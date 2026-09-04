@@ -327,8 +327,11 @@ if query:
             if ingr:
                 st.markdown("**주요 성분**")
                 for i in ingr:
-                    st.markdown(f"- **{i.get('name_tr','')}** {i.get('amount','')} — {i.get('role_tr','')}")
-                    st.caption(f"{i.get('name_ko','')} — {i.get('role_ko','')}")
+                    if isinstance(i, dict):
+                        st.markdown(f"- **{i.get('name_tr','')}** {i.get('amount','')} — {i.get('role_tr','')}")
+                        st.caption(f"{i.get('name_ko','')} — {i.get('role_ko','')}")
+                    else:
+                        st.markdown(f"- {i}")
                 st.caption("성분·함량: 식약처 허가정보 · 역할 설명: 일반 약학 정보(AI)")
             st.caption("근거: 식약처 의약품 허가정보" + (" + e약은요" if easy else "") + " · AI 생성 안내, 약사 확인 후 제공")
 
