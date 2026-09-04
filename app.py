@@ -5,13 +5,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import unquote
 
-from gtts import gTTS
-
 import requests
 import streamlit as st
 import streamlit.components.v1 as components
 from google import genai
 from google.genai import types
+from gtts import gTTS
 
 # 키는 코드에 넣지 않습니다.
 #  - 로컬: 같은 폴더에 .streamlit/secrets.toml 파일
@@ -19,18 +18,20 @@ from google.genai import types
 DATA_GO_KR_KEY = st.secrets.get("DATA_GO_KR_KEY", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-MODEL = "gemini-3.1-flash-lite"
+MODEL = "gemini-3.1-flash-lite"  # 무료 한도가 넉넉한 모델. 결제 연결 후엔 gemini-3.6-flash 로 바꿔도 됨
 DATA_KEY = unquote(DATA_GO_KR_KEY)
 
-# 기본 검색: 의약품 제품 허가정보 (모든 허가 의약품 포함). 버전 번호가 바뀌면 이 줄만 수정.
-PERMIT_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07/getDrugPrdtPrmsnDtlInq06"
-# 보조: e약은요 (쉬운 설명이 있는 제품만)
-EASY_DRUG_URL = "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList"
+# 식약처 API (버전 번호가 바뀌면 이 줄들만 수정)
+PERMIT_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07/getDrugPrdtPrmsnDtlInq06"  # 의약품 허가정보
+EASY_DRUG_URL = "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList"        # e약은요 (보조)
+HTFS_URL = "https://apis.data.go.kr/1471000/HtfsInfoService03/getHtfsItem01"                        # 건강기능식품
 
 # 언어명 → (BCP-47 TTS 코드, 성조/발음 특성 메모)
 LANGUAGES = {
     "영어": ("en-US", "강세 위치"),
-    "중국어": ("zh-CN", "4성조 + 경성"),
+    "중국어(보통화)": ("zh-CN", "4성조 + 경성, 간체자"),
+    "중국어(번체·대만)": ("zh-TW", "4성조, 번체자, 대만 표현"),
+    "광둥어": ("zh-HK", "6성조(Jyutping 숫자 성조), 번체자, 홍콩 구어체"),
     "일본어": ("ja-JP", "장음·촉음·고저 악센트"),
     "베트남어": ("vi-VN", "6성조"),
     "태국어": ("th-TH", "5성조"),
@@ -45,10 +46,10 @@ LANGUAGES = {
     "스페인어": ("es-ES", "r 굴림, 뒤에서 두 번째 음절 강세"),
 }
 
-# gTTS(구글 음성) 언어 코드. 없는 언어(몽골어)는 브라우저 음성으로 폴백
+# gTTS(구글 음성) 언어 코드. 없는 언어(광둥어·몽골어)는 브라우저 음성으로 폴백
 GTTS_LANG = {
-    "영어": "en", "중국어": "zh-CN", "일본어": "ja", "베트남어": "vi", "태국어": "th",
-    "인도네시아어": "id", "아랍어": "ar", "터키어": "tr", "프랑스어": "fr", "독일어": "de",
+    "영어": "en", "중국어(보통화)": "zh-CN", "중국어(번체·대만)": "zh-TW", "일본어": "ja", "베트남어": "vi",
+    "태국어": "th", "인도네시아어": "id", "아랍어": "ar", "터키어": "tr", "프랑스어": "fr", "독일어": "de",
     "이탈리아어": "it", "러시아어": "ru", "스페인어": "es",
 }
 
@@ -59,16 +60,18 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 def _get(url: str, params: dict) -> list[dict]:
     r = requests.get(url, params={"serviceKey": DATA_KEY, "type": "json", "pageNo": 1, **params}, timeout=12)
     r.raise_for_status()
-    return r.json().get("body", {}).get("items") or []
+    items = r.json().get("body", {}).get("items") or []
+    # 건기식 API는 {"item": {...}} 로 한 겹 더 싸여 있음
+    return [it.get("item", it) for it in items]
 
 
 def search_variants(q: str) -> list[str]:
-    """검색 실패 시 시도할 변형: 환→원, 마지막 제형 글자 제거, 앞 3~4글자"""
+    """검색 실패 시 시도할 변형: 환→원, 제형 글자 제거, 앞 3~4글자"""
     q = q.strip()
     out = [q]
     if q.endswith("환"):
         out.append(q[:-1] + "원")
-    m = re.sub(r"(정|캡슐|연질캡슐|액|시럽|산|환|원|연고|크림|겔|패치|파스)$", "", q)
+    m = re.sub(r"(정|캡슐|연질캡슐|액|시럽|산|환|원|연고|크림|겔|패치|파스|스틱|분말)$", "", q)
     if m and m != q:
         out.append(m)
     if len(q) > 4:
@@ -84,18 +87,39 @@ def search_variants(q: str) -> list[str]:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def search_permit(q: str, rows: int = 8) -> tuple[list[dict], str]:
-    """허가정보에서 제품명 검색. 결과 없으면 변형 검색어로 재시도. (결과, 실제로 쓴 검색어) 반환"""
+def search_drug(q: str, rows: int = 6) -> list[dict]:
     for v in search_variants(q):
         items = _get(PERMIT_URL, {"item_name": v, "numOfRows": rows})
         if items:
-            return items, v
-    return [], q
+            return [{"kind": "의약품", "name": it.get("ITEM_NAME", ""), "maker": it.get("ENTP_NAME", ""), "raw": it} for it in items]
+    return []
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_htfs(q: str, rows: int = 6) -> list[dict]:
+    for v in search_variants(q):
+        items = _get(HTFS_URL, {"Prduct": v, "numOfRows": rows})
+        if items:
+            return [{"kind": "건강기능식품", "name": it.get("PRDUCT", "").strip(), "maker": it.get("ENTRPS", ""), "raw": it} for it in items]
+    return []
+
+
+def search_all(q: str) -> tuple[list[dict], dict]:
+    """의약품·건기식 동시 검색. (결과, 소스별 오류) 반환"""
+    errors = {}
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futs = {"의약품": ex.submit(search_drug, q), "건강기능식품": ex.submit(search_htfs, q)}
+    results = []
+    for kind, f in futs.items():
+        try:
+            results += f.result()
+        except Exception as e:
+            errors[kind] = str(e)
+    return results, errors
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def easy_by_seq(item_seq: str) -> dict | None:
-    """e약은요에 쉬운 설명이 있으면 가져오기 (없는 제품이 많음)"""
     try:
         items = _get(EASY_DRUG_URL, {"itemSeq": item_seq, "numOfRows": 1})
         return items[0] if items else None
@@ -104,7 +128,6 @@ def easy_by_seq(item_seq: str) -> dict | None:
 
 
 def doc_text(xml: str | None) -> str:
-    """허가사항 XML(EE_DOC_DATA 등)에서 텍스트만 추출"""
     if not xml:
         return ""
     t = re.sub(r"<!\[CDATA\[|\]\]>", "", xml)
@@ -113,7 +136,6 @@ def doc_text(xml: str | None) -> str:
 
 
 def parse_material(material: str | None) -> list[str]:
-    """'총량 : 1정|성분명 : 티아민질산염|분량 : 50|단위 : 밀리그램|...;...' → ['티아민질산염 50밀리그램', ...]"""
     out = []
     for chunk in (material or "").split(";"):
         kv = {}
@@ -132,11 +154,15 @@ def strip_html(s: str | None) -> str:
     return re.sub(r"<[^>]+>", "", s or "").strip()
 
 
-def build_source_text(permit: dict, easy: dict | None) -> str:
+def clean(s: str | None) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+def build_drug_text(permit: dict, easy: dict | None) -> str:
     lines = [
+        f"[제품군] 의약품 — {permit.get('ETC_OTC_CODE','')}",
         f"[제품명] {permit.get('ITEM_NAME','')}",
         f"[제조사] {permit.get('ENTP_NAME','')}",
-        f"[구분] {permit.get('ETC_OTC_CODE','')}",
     ]
     ingr = parse_material(permit.get("MATERIAL_NAME"))
     if ingr:
@@ -157,32 +183,49 @@ def build_source_text(permit: dict, easy: dict | None) -> str:
     return "\n".join(lines)
 
 
+def build_htfs_text(h: dict) -> str:
+    lines = [
+        "[제품군] 건강기능식품 (의약품 아님 — 질병 치료·예방 표현 금지, 식약처 인정 기능성 문구 '~에 도움을 줄 수 있음'만 사용)",
+        f"[제품명] {clean(h.get('PRDUCT'))}",
+        f"[제조사] {clean(h.get('ENTRPS'))}",
+    ]
+    for label, key in [("기능성 내용(식약처 인정)", "MAIN_FNCTN"), ("섭취량·섭취방법", "SRV_USE"),
+                       ("섭취 시 주의사항", "INTAKE_HINT1"), ("성상", "SUNGSANG"),
+                       ("보관방법", "PRSRV_PD"), ("유통기한", "DISTB_PD"), ("기준규격", "BASE_STANDARD")]:
+        t = clean(h.get(key))
+        if t:
+            lines.append(f"[{label}] {t[:1200]}")
+    return "\n".join(lines)
+
+
 # ---------- Gemini ----------
 SYSTEM = """당신은 한국 약국에서 외국인 고객을 응대하는 약사를 돕는 도우미입니다.
 반드시 아래 JSON 하나만 반환하세요. JSON 외의 텍스트, 마크다운 펜스는 금지.
-원문에는 [허가사항] 전문과, 있을 경우 [쉬운설명]이 함께 옵니다. 내용은 허가사항이 기준이고, 쉬운설명은 표현을 부드럽게 하는 데 참고하세요.
-사용상 주의사항 전문은 매우 길 수 있으니 일반 고객에게 실제로 중요한 것(금기, 흔한 부작용, 병용 주의)만 추리세요.
+원문 첫 줄의 [제품군]을 반드시 확인하세요.
+- 의약품: 효능효과 원문의 동사(개선/완화/치료/예방)를 그대로 따르고, 원문이 "개선"이면 "치료"로 올리지 말 것.
+- 건강기능식품: 절대 "치료", "예방", "효과가 있다"라고 하지 말고, 식약처 인정 기능성 문구대로 "~에 도움을 줄 수 있어요"만 사용.
+  "복용" 대신 "섭취", "약" 대신 "건강기능식품/영양제"라고 부를 것.
+원문에는 [허가사항] 전문과, 있을 경우 [쉬운설명]이 함께 옵니다. 내용은 허가사항이 기준이고, 쉬운설명은 표현 참고용.
+주의사항 전문은 매우 길 수 있으니 일반 고객에게 실제로 중요한 것(금기, 흔한 부작용, 병용 주의)만 추리세요.
 
-1. patient_guide: 고객에게 보여줄 복약 안내. 대상 언어로, 짧은 문장, 쉬운 표현.
+1. patient_guide: 고객에게 보여줄 안내. 대상 언어로, 짧은 문장, 쉬운 표현.
    각 항목은 {"ko": 한국어, "tr": 대상 언어} 쌍. ko는 약사가 번역을 검토하기 위한 것이므로 tr과 내용이 정확히 일치해야 함.
-   - what_it_is: 2~3문장. 첫 문장은 효능효과를 쉬운 말로. 이어서 주성분이 어떻게 작용해서 그 효과를 내는지
-     한 문장 (일반 약학 지식, 보수적으로). 고객이 "왜 이 약이 나한테 맞는지" 이해할 수 있게.
+   - what_it_is: 2~3문장. 첫 문장은 효능(또는 기능성)을 쉬운 말로. 이어서 주성분이 어떻게 작용하는지 한 문장 (일반 약학 지식, 보수적으로).
    - how_to_take, cautions, see_pharmacist_if: 원문에 있는 내용만 근거로. 없는 정보는 지어내지 마세요.
-   - ingredients: [주성분] 목록이 있을 때만. 성분별 배열 [{"name_ko":..., "name_tr":..., "amount":..., "role_ko":..., "role_tr":...}].
-     name은 원료명이 아니라 고객이 알아들을 이름 (예: "빌베리건조엑스" → "빌베리 추출물(안토시아닌)").
-     role은 1~2문장: 이 성분이 몸에서 무엇을 하고 이 제품에서 어떤 역할인지. 일반 약학 지식이므로 과장 없이.
-     같은 계열 성분(비타민 B군, 생약 복합 등)이 여러 개면 묶어서 하나로 써도 됨. 주성분 목록이 없으면 빈 배열.
+   - ingredients: 주성분·원료 정보가 있을 때만. 성분별 배열 [{"name_ko":..., "name_tr":..., "amount":..., "role_ko":..., "role_tr":...}].
+     name은 고객이 알아들을 이름 (예: "빌베리건조엑스" → "빌베리 추출물(안토시아닌)"). role은 1~2문장, 과장 없이.
+     같은 계열이 여러 개면 묶어도 됨. 정보가 없으면 빈 배열. 반드시 객체 배열로.
 
 2. key_phrases: 한국인 약사가 이 제품을 팔면서 직접 입으로 말하면 효과적인 단어·짧은 구 8~9개.
    반드시 아래 세 묶음을 순서대로 포함:
-   (a) 효능 3~4개: 이 제품 고유의 것. "대상 + 동사" 형태의 짧은 문장으로 (예: "야맹증을 개선해요", "망막 변성을 개선해요").
-       동사는 원문(효능효과)의 표현을 따를 것 — 개선/완화/치료/예방 중 원문에 쓰인 것만. 원문이 "개선"이면 "치료"로 올리지 말 것.
-       성분 1개 포함 (예: "빌베리 성분이에요").
-   (b) 복용 2~3개: 이 제품의 실제 용법에서 (예: 하루 두세 번, 한 캡슐, 식후).
-   (c) 확인 2개: 약사가 물어보거나 알려줄 것 (예: 당뇨 있으세요?, 2주 지나도 안 나으면 병원).
-   문장 전체가 아니라 핵심 단어·짧은 구. 각 항목에 "group": "효능" | "복용" | "확인" 을 넣을 것.
+   (a) 효능 3~4개: 이 제품 고유의 것. "대상 + 동사" 짧은 문장 (의약품: "야맹증을 개선해요" / 건기식: "면역력에 도움을 줄 수 있어요").
+       성분 1개 포함 (예: "홍삼 성분이에요").
+   (b) 복용 2~3개: 실제 용법·섭취방법에서 (예: 하루 두세 번, 한 캡슐, 식후, 물에 타서).
+   (c) 확인 2개: 약사가 물어보거나 알려줄 것 (예: 당뇨약 드세요?, 2주 지나도 안 나으면 병원).
+   각 항목에 "group": "효능" | "복용" | "확인" 을 넣을 것.
    각 항목: {"group":..., "ko": 한국어, "native": 대상 언어 표기, "roman": 로마자(성조 부호 포함, 라틴문자 언어는 원문 그대로),
              "hangul": 한국인이 읽기 쉬운 한글 근사 발음, "tip": 성조/강세/발음 팁 한 줄}
+   광둥어는 native를 번체자 홍콩 구어체로, roman은 Jyutping(예: gam2 mou6 joek6)으로.
    hangul은 한국어 음운으로 최대한 가깝게. tip은 한국어 화자가 틀리기 쉬운 지점을 구체적으로.
 
 형식:
@@ -213,7 +256,7 @@ def generate(source_text: str, language: str) -> dict:
             return json.loads(raw)
         except Exception as e:
             last_err = e
-            if "503" in str(e) or "429" in str(e):
+            if "503" in str(e) or ("429" in str(e) and "per_day" not in str(e).lower()):
                 time.sleep(3)
                 continue
             raise
@@ -223,7 +266,6 @@ def generate(source_text: str, language: str) -> dict:
 # ---------- 음성 ----------
 @st.cache_data(ttl=86400, show_spinner=False)
 def tts_mp3(text: str, gtts_lang: str) -> bytes | None:
-    """서버에서 mp3 생성 (폰에서도 확실히 재생됨). 실패하면 None."""
     try:
         buf = io.BytesIO()
         gTTS(text=text, lang=gtts_lang, slow=False).write_to_fp(buf)
@@ -253,7 +295,7 @@ def tts_button(text: str, lang_code: str):
 
 def pair(v) -> tuple[str, str]:
     if isinstance(v, dict):
-        return v.get("tr", ""), v.get("ko", "")
+        return str(v.get("tr", "")), str(v.get("ko", ""))
     return str(v or ""), ""
 
 
@@ -266,32 +308,33 @@ if not DATA_GO_KR_KEY or not GEMINI_API_KEY:
     st.stop()
 
 col_q, col_l = st.columns([3, 1])
-query = col_q.text_input("제품명 검색 (예: 타이레놀, 우황청심원, 임팩타민)")
+query = col_q.text_input("제품명 검색 (예: 타이레놀, 우황청심원, 홍삼정, 임팩타민)")
 language = col_l.selectbox("고객 언어", list(LANGUAGES))
 
 if query:
-    with st.spinner("식약처 허가정보 조회 중…"):
-        try:
-            items, used = search_permit(query)
-        except Exception as e:
-            st.error(f"조회 실패: {e}")
-            items, used = [], query
+    with st.spinner("식약처 조회 중 (의약품 + 건강기능식품)…"):
+        results, errors = search_all(query)
+    for kind, msg in errors.items():
+        st.caption(f"⚠️ {kind} 조회 실패: {msg[:120]}")
 
-    if not items:
-        st.info("허가정보에서 해당 제품을 찾지 못했어요. 제품명을 바꿔보세요. (박카스 등 의약외품은 이 데이터에 없습니다)")
+    if not results:
+        st.info("의약품·건강기능식품 어디에서도 찾지 못했어요. 제품명을 바꿔보세요. (박카스 등 의약외품, 일반 화장품은 아직 미지원)")
     else:
-        if used != query.strip():
-            st.caption(f"'{query}'로는 결과가 없어 '{used}'로 검색했어요.")
-        names = [f"{d.get('ITEM_NAME','')} ({d.get('ENTP_NAME','')})" for d in items]
-        pick = st.radio("제품 선택", names, horizontal=True)
-        permit = items[names.index(pick)]
-        easy = easy_by_seq(permit.get("ITEM_SEQ", ""))
-        source_text = build_source_text(permit, easy)
+        labels = [f"[{r['kind']}] {r['name']} ({r['maker']})" for r in results]
+        pick = st.radio("제품 선택", labels)
+        chosen = results[labels.index(pick)]
+        raw = chosen["raw"]
 
-        if "전문" in str(permit.get("ETC_OTC_CODE", "")):
-            st.error("전문의약품입니다. 처방전 없이 판매할 수 없어요.")
-        if easy is None:
-            st.caption("e약은요 쉬운 설명은 없는 제품이라 허가사항 전문으로 생성합니다.")
+        if chosen["kind"] == "의약품":
+            easy = easy_by_seq(raw.get("ITEM_SEQ", ""))
+            source_text = build_drug_text(raw, easy)
+            basis = "식약처 의약품 허가정보" + (" + e약은요" if easy else "")
+            if "전문" in str(raw.get("ETC_OTC_CODE", "")):
+                st.error("전문의약품입니다. 처방전 없이 판매할 수 없어요.")
+        else:
+            source_text = build_htfs_text(raw)
+            basis = "식약처 건강기능식품정보"
+            st.info("건강기능식품 — 안내문과 발음 카드는 '~에 도움을 줄 수 있어요' 표현으로 생성됩니다.")
 
         with st.expander("식약처 원문 보기"):
             st.text(source_text)
@@ -308,13 +351,11 @@ if query:
 
         with left:
             st.subheader(f"🧾 고객용 안내 ({language})")
-            g = out.get("patient_guide", {})
-            for label, k in [
-                ("이 약은", "what_it_is"),
-                ("복용법", "how_to_take"),
-                ("주의사항", "cautions"),
-                ("약사 상담이 필요한 경우", "see_pharmacist_if"),
-            ]:
+            g = out.get("patient_guide", {}) or {}
+            head = "이 제품은" if chosen["kind"] == "건강기능식품" else "이 약은"
+            how = "섭취방법" if chosen["kind"] == "건강기능식품" else "복용법"
+            for label, k in [(head, "what_it_is"), (how, "how_to_take"), ("주의사항", "cautions"),
+                             ("약사 상담이 필요한 경우", "see_pharmacist_if")]:
                 tr, ko = pair(g.get(k))
                 if not tr:
                     continue
@@ -332,14 +373,14 @@ if query:
                         st.caption(f"{i.get('name_ko','')} — {i.get('role_ko','')}")
                     else:
                         st.markdown(f"- {i}")
-                st.caption("성분·함량: 식약처 허가정보 · 역할 설명: 일반 약학 정보(AI)")
-            st.caption("근거: 식약처 의약품 허가정보" + (" + e약은요" if easy else "") + " · AI 생성 안내, 약사 확인 후 제공")
+                st.caption("성분·함량: 식약처 데이터 · 역할 설명: 일반 약학 정보(AI)")
+            st.caption(f"근거: {basis} · AI 생성 안내, 약사 확인 후 제공")
 
         with right:
             st.subheader("🗣️ 약사가 직접 말하기")
-            phrases = out.get("key_phrases", [])
+            phrases = [p for p in (out.get("key_phrases") or []) if isinstance(p, dict)]
             gl = GTTS_LANG.get(language)
-            audios = make_all_audio([p.get("native", "") for p in phrases], gl) if gl else [None] * len(phrases)
+            audios = make_all_audio([str(p.get("native", "")) for p in phrases], gl) if gl else [None] * len(phrases)
             last_group = None
             for p, audio in zip(phrases, audios):
                 if p.get("group") and p.get("group") != last_group:
@@ -353,4 +394,4 @@ if query:
                     if audio:
                         st.audio(audio, format="audio/mp3")
                     else:
-                        tts_button(p.get("native", ""), tts_code)
+                        tts_button(str(p.get("native", "")), tts_code)
