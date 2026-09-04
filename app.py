@@ -1,7 +1,11 @@
+import io
 import json
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import unquote
+
+from gtts import gTTS
 
 import requests
 import streamlit as st
@@ -39,6 +43,13 @@ LANGUAGES = {
     "이탈리아어": ("it-IT", "이중자음, 모음 명확"),
     "러시아어": ("ru-RU", "강세 위치에 따른 모음 약화"),
     "스페인어": ("es-ES", "r 굴림, 뒤에서 두 번째 음절 강세"),
+}
+
+# gTTS(구글 음성) 언어 코드. 없는 언어(몽골어)는 브라우저 음성으로 폴백
+GTTS_LANG = {
+    "영어": "en", "중국어": "zh-CN", "일본어": "ja", "베트남어": "vi", "태국어": "th",
+    "인도네시아어": "id", "아랍어": "ar", "터키어": "tr", "프랑스어": "fr", "독일어": "de",
+    "이탈리아어": "it", "러시아어": "ru", "스페인어": "es",
 }
 
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -209,7 +220,23 @@ def generate(source_text: str, language: str) -> dict:
     raise last_err
 
 
-# ---------- TTS 버튼 ----------
+# ---------- 음성 ----------
+@st.cache_data(ttl=86400, show_spinner=False)
+def tts_mp3(text: str, gtts_lang: str) -> bytes | None:
+    """서버에서 mp3 생성 (폰에서도 확실히 재생됨). 실패하면 None."""
+    try:
+        buf = io.BytesIO()
+        gTTS(text=text, lang=gtts_lang, slow=False).write_to_fp(buf)
+        return buf.getvalue()
+    except Exception:
+        return None
+
+
+def make_all_audio(texts: list[str], gtts_lang: str) -> list[bytes | None]:
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        return list(ex.map(lambda t: tts_mp3(t, gtts_lang), texts))
+
+
 def tts_button(text: str, lang_code: str):
     safe = json.dumps(text)
     components.html(
@@ -307,16 +334,20 @@ if query:
 
         with right:
             st.subheader("🗣️ 약사가 직접 말하기")
+            phrases = out.get("key_phrases", [])
+            gl = GTTS_LANG.get(language)
+            audios = make_all_audio([p.get("native", "") for p in phrases], gl) if gl else [None] * len(phrases)
             last_group = None
-            for p in out.get("key_phrases", []):
+            for p, audio in zip(phrases, audios):
                 if p.get("group") and p.get("group") != last_group:
                     st.markdown(f"**▸ {p['group']}**")
                     last_group = p["group"]
                 with st.container(border=True):
-                    c1, c2 = st.columns([5, 1])
-                    c1.markdown(f"**{p.get('ko','')}**")
-                    c1.markdown(f"<span style='font-size:1.6em'>{p.get('native','')}</span>", unsafe_allow_html=True)
-                    c1.markdown(f"`{p.get('roman','')}` · **{p.get('hangul','')}**")
-                    c1.caption(f"💡 {p.get('tip','')}")
-                    with c2:
+                    st.markdown(f"**{p.get('ko','')}**")
+                    st.markdown(f"<span style='font-size:1.6em'>{p.get('native','')}</span>", unsafe_allow_html=True)
+                    st.markdown(f"`{p.get('roman','')}` · **{p.get('hangul','')}**")
+                    st.caption(f"💡 {p.get('tip','')}")
+                    if audio:
+                        st.audio(audio, format="audio/mp3")
+                    else:
                         tts_button(p.get("native", ""), tts_code)
