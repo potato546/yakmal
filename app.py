@@ -19,7 +19,7 @@ from google.genai import types
 DATA_GO_KR_KEY = st.secrets.get("DATA_GO_KR_KEY", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-MODEL = "gemini-3.6-flash"
+MODEL = "gemini-3.1-flash-lite"
 DATA_KEY = unquote(DATA_GO_KR_KEY)
 
 # 기본 검색: 의약품 제품 허가정보 (모든 허가 의약품 포함). 버전 번호가 바뀌면 이 줄만 수정.
