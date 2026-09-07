@@ -25,6 +25,7 @@ DATA_KEY = unquote(DATA_GO_KR_KEY)
 PERMIT_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07/getDrugPrdtPrmsnDtlInq06"  # 의약품 허가정보
 EASY_DRUG_URL = "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList"        # e약은요 (보조)
 HTFS_URL = "https://apis.data.go.kr/1471000/HtfsInfoService03/getHtfsItem01"                        # 건강기능식품
+COSM_URL = "https://apis.data.go.kr/1471000/FtnltCosmRptPrdlstInfoService01/getRptPrdlstInq01"        # 기능성화장품 보고품목
 
 # 언어명 → (BCP-47 TTS 코드, 성조/발음 특성 메모)
 LANGUAGES = {
@@ -104,11 +105,22 @@ def search_htfs(q: str, rows: int = 6) -> list[dict]:
     return []
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def search_cosm(q: str, rows: int = 8) -> list[dict]:
+    for v in search_variants(q):
+        items = _get(COSM_URL, {"item_name": v, "numOfRows": rows})
+        items = [it for it in items if it.get("CANCEL_APPROVAL_YN") != "Y"]  # 취하된 보고 제외
+        if items:
+            return [{"kind": "기능성화장품", "name": it.get("ITEM_NAME", ""), "maker": it.get("ENTP_NAME", ""), "raw": it} for it in items]
+    return []
+
+
 def search_all(q: str) -> tuple[list[dict], dict]:
-    """의약품·건기식 동시 검색. (결과, 소스별 오류) 반환"""
+    """의약품·건기식·기능성화장품 동시 검색. (결과, 소스별 오류) 반환"""
     errors = {}
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        futs = {"의약품": ex.submit(search_drug, q), "건강기능식품": ex.submit(search_htfs, q)}
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {"의약품": ex.submit(search_drug, q), "건강기능식품": ex.submit(search_htfs, q),
+                "기능성화장품": ex.submit(search_cosm, q)}
     results = []
     for kind, f in futs.items():
         try:
@@ -198,6 +210,27 @@ def build_htfs_text(h: dict) -> str:
     return "\n".join(lines)
 
 
+def build_cosm_text(c: dict, ingredients: str = "") -> str:
+    lines = [
+        "[제품군] 기능성화장품 (의약품 아님 — 치료·개선 단정 표현 금지. 식약처에 보고된 기능성 문구 '~에 도움을 준다'만 사용. "
+        "'바른다/사용한다' 표현, '복용' 금지)",
+        f"[제품명] {clean(c.get('ITEM_NAME'))}",
+        f"[책임판매업체] {clean(c.get('ENTP_NAME'))}",
+        f"[식약처 보고 기능성] {clean(c.get('EE_NAME'))}",
+    ]
+    if c.get("SPF") or c.get("PA"):
+        lines.append(f"[자외선차단] SPF {c.get('SPF') or '-'} / PA {c.get('PA') or '-'}")
+    if c.get("USAGE_DOSAGE"):
+        lines.append(f"[사용법(보고 내용)] {clean(c.get('USAGE_DOSAGE'))}")
+    if c.get("REPORT_DATE"):
+        lines.append(f"[보고일] {c['REPORT_DATE']}")
+    if ingredients.strip():
+        lines.append(f"[전성분(포장 표시, 약사가 입력)] {clean(ingredients)[:1500]}")
+    else:
+        lines.append("[전성분] 제공되지 않음 — 성분 설명은 하지 말고 ingredients는 빈 배열")
+    return "\n".join(lines)
+
+
 # ---------- Gemini ----------
 SYSTEM = """당신은 한국 약국에서 외국인 고객을 응대하는 약사를 돕는 도우미입니다.
 반드시 아래 JSON 하나만 반환하세요. JSON 외의 텍스트, 마크다운 펜스는 금지.
@@ -205,6 +238,10 @@ SYSTEM = """당신은 한국 약국에서 외국인 고객을 응대하는 약�
 - 의약품: 효능효과 원문의 동사(개선/완화/치료/예방)를 그대로 따르고, 원문이 "개선"이면 "치료"로 올리지 말 것.
 - 건강기능식품: 절대 "치료", "예방", "효과가 있다"라고 하지 말고, 식약처 인정 기능성 문구대로 "~에 도움을 줄 수 있어요"만 사용.
   "복용" 대신 "섭취", "약" 대신 "건강기능식품/영양제"라고 부를 것.
+- 기능성화장품: 식약처 보고 기능성(미백/주름개선/자외선차단 등)을 "~에 도움을 줘요"로만. 치료·질환 표현 금지.
+  how_to_take는 사용법(바르는 법·순서·양), cautions는 화장품 일반 주의(눈에 들어가지 않게, 이상 시 사용 중지, 자외선차단제는 덧바르기).
+  전성분이 주어졌을 때만 ingredients에 주요 성분 3~5개(미백·주름·보습·진정 등 핵심 역할 성분 위주)를 넣고, 역할 설명은 일반 화장품 성분 지식으로 보수적으로.
+  key_phrases (a)는 "미백에 도움을 줘요", "주름 개선에 도움을 줘요", "SPF 50이에요" 같은 것, (b)는 사용법(아침저녁, 마지막 단계에, 덧바르세요), (c)는 확인(민감성 피부세요?, 눈 주변 피하세요).
 원문에는 [허가사항] 전문과, 있을 경우 [쉬운설명]이 함께 옵니다. 내용은 허가사항이 기준이고, 쉬운설명은 표현 참고용.
 주의사항 전문은 매우 길 수 있으니 일반 고객에게 실제로 중요한 것(금기, 흔한 부작용, 병용 주의)만 추리세요.
 
@@ -308,17 +345,17 @@ if not DATA_GO_KR_KEY or not GEMINI_API_KEY:
     st.stop()
 
 col_q, col_l = st.columns([3, 1])
-query = col_q.text_input("제품명 검색 (예: 타이레놀, 우황청심원, 홍삼정, 임팩타민)")
+query = col_q.text_input("제품명 검색 (예: 타이레놀, 우황청심원, 홍삼정, 리쥬올)")
 language = col_l.selectbox("고객 언어", list(LANGUAGES))
 
 if query:
-    with st.spinner("식약처 조회 중 (의약품 + 건강기능식품)…"):
+    with st.spinner("식약처 조회 중 (의약품 + 건강기능식품 + 기능성화장품)…"):
         results, errors = search_all(query)
     for kind, msg in errors.items():
         st.caption(f"⚠️ {kind} 조회 실패: {msg[:120]}")
 
     if not results:
-        st.info("의약품·건강기능식품 어디에서도 찾지 못했어요. 제품명을 바꿔보세요. (박카스 등 의약외품, 일반 화장품은 아직 미지원)")
+        st.info("찾지 못했어요. 제품명을 바꿔보세요. (의약외품, 기능성 표시가 없는 일반 화장품은 식약처 제품 데이터가 없습니다)")
     else:
         labels = [f"[{r['kind']}] {r['name']} ({r['maker']})" for r in results]
         pick = st.radio("제품 선택", labels)
@@ -331,10 +368,17 @@ if query:
             basis = "식약처 의약품 허가정보" + (" + e약은요" if easy else "")
             if "전문" in str(raw.get("ETC_OTC_CODE", "")):
                 st.error("전문의약품입니다. 처방전 없이 판매할 수 없어요.")
-        else:
+        elif chosen["kind"] == "건강기능식품":
+            easy = None
             source_text = build_htfs_text(raw)
             basis = "식약처 건강기능식품정보"
             st.info("건강기능식품 — 안내문과 발음 카드는 '~에 도움을 줄 수 있어요' 표현으로 생성됩니다.")
+        else:
+            easy = None
+            st.info(f"기능성화장품 — 식약처 보고 기능성: {clean(raw.get('EE_NAME'))}")
+            ingr_text = st.text_area("전성분 붙여넣기 (선택) — 포장의 전성분표를 입력하면 주요 성분 설명이 추가됩니다", height=90)
+            source_text = build_cosm_text(raw, ingr_text)
+            basis = "식약처 기능성화장품 보고품목정보" + (" + 포장 전성분" if ingr_text.strip() else "")
 
         with st.expander("식약처 원문 보기"):
             st.text(source_text)
@@ -351,9 +395,11 @@ if query:
 
         with left:
             st.subheader(f"🧾 고객용 안내 ({language})")
+            if chosen["kind"] == "의약품" and easy and easy.get("itemImage"):
+                st.image(easy["itemImage"], width=220, caption="낱알 모양")
             g = out.get("patient_guide", {}) or {}
-            head = "이 제품은" if chosen["kind"] == "건강기능식품" else "이 약은"
-            how = "섭취방법" if chosen["kind"] == "건강기능식품" else "복용법"
+            head = "이 약은" if chosen["kind"] == "의약품" else "이 제품은"
+            how = {"의약품": "복용법", "건강기능식품": "섭취방법"}.get(chosen["kind"], "사용법")
             for label, k in [(head, "what_it_is"), (how, "how_to_take"), ("주의사항", "cautions"),
                              ("약사 상담이 필요한 경우", "see_pharmacist_if")]:
                 tr, ko = pair(g.get(k))
