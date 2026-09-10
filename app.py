@@ -133,11 +133,15 @@ def search_cosm(q: str, rows: int = 8) -> list[dict]:
     return []
 
 
-WEB_INGR_SYSTEM = """한국 화장품의 전성분을 웹에서 찾아 정리합니다. 구글 검색으로 "제품명 전성분"을 찾아
-반드시 해당 제품(제품명·제조사가 일치)의 전성분만 사용하세요. 다른 제품이나 확신이 없으면 found=false.
-JSON만 반환: {"found": true/false, "ingredients": "전성분을 표시 순서대로 쉼표로 이어 쓴 문자열",
+WEB_INGR_SYSTEM = """한국 화장품의 전성분을 웹에서 찾아 정리합니다. 구글 검색을 여러 번(제품명 전성분 / 제품명 성분 / 제조사 제품명 / 영문명) 해서
+해당 제품의 전성분을 찾으세요. 제조사 공식 사이트, 올리브영·화해·쿠팡 등 판매 페이지의 전성분 표기를 우선합니다.
+전체 전성분을 못 찾았더라도 기사나 홈페이지에서 확인되는 주요 성분이 있으면 partial=true로 그것만 정리하세요.
+다른 제품 것을 섞지 마세요. 정말 아무것도 없을 때만 found=false.
+JSON만 반환 (마크다운 펜스 금지):
+{"found": true/false, "partial": true/false,
+ "ingredients": "전성분(또는 확인된 주요 성분)을 표시 순서대로 쉼표로 이어 쓴 문자열",
  "disclosed_amounts": "회사가 공개한 함량이 있으면 (예: PDRN 2%), 없으면 빈 문자열",
- "source": "출처 사이트명 또는 URL"}"""
+ "source": "출처 사이트명 또는 URL", "note": "확인 범위나 주의점 한 줄"}"""
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -443,10 +447,15 @@ if query:
                         ingr_text = w["ingredients"]
                     if w.get("disclosed_amounts"):
                         ingr_text += f"\n[회사 공개 함량] {w['disclosed_amounts']}"
-                    web_note = f" · 전성분: 웹 출처({w.get('source','')}) — 포장과 대조 필요"
-                    st.warning(f"웹에서 찾은 전성분 (출처: {w.get('source','')}) — 포장과 대조해서 확인하세요.\n\n{w['ingredients'][:400]}{'…' if len(w['ingredients'])>400 else ''}")
+                    tag = "주요 성분 일부" if w.get("partial") else "전성분"
+                    web_note = f" · {tag}: 웹 출처({w.get('source','')}) — 포장과 대조 필요"
+                    st.warning(f"웹에서 찾은 {tag} (출처: {w.get('source','')}) — 포장과 대조해서 확인하세요.\n\n"
+                               f"{w['ingredients'][:400]}{'…' if len(w['ingredients'])>400 else ''}"
+                               + (f"\n\n{w['note']}" if w.get("note") else ""))
+                elif w.get("error"):
+                    st.error(f"웹 검색 오류: {w['error'][:300]}")
                 else:
-                    st.caption("웹에서 확실한 전성분을 찾지 못했어요. 포장의 전성분을 붙여넣어 주세요.")
+                    st.caption("웹에서 성분을 찾지 못했어요. 포장의 전성분을 붙여넣어 주세요." + (f" ({w['note']})" if w.get("note") else ""))
             source_text = build_cosm_text(raw, ingr_text)
             basis = f"식약처 기능성화장품 {raw.get('_src','보고')}품목정보" + (web_note or (" + 포장 전성분" if ingr_text.strip() else ""))
 
