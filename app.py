@@ -290,7 +290,9 @@ def generate(source_text: str, language: str) -> dict:
             if not resp.text:
                 raise RuntimeError(f"빈 응답: {resp.candidates[0].finish_reason if resp.candidates else resp}")
             raw = re.sub(r"^```(?:json)?|```$", "", resp.text.strip(), flags=re.M).strip()
-            return json.loads(raw)
+            raw = raw[raw.find("{"):]  # 앞의 잡글 제거
+            obj, _ = json.JSONDecoder().raw_decode(raw)  # 첫 JSON만 읽고 뒤는 무시
+            return obj
         except Exception as e:
             last_err = e
             if "503" in str(e) or ("429" in str(e) and "per_day" not in str(e).lower()):
