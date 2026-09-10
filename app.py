@@ -26,6 +26,7 @@ PERMIT_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07/getDrug
 EASY_DRUG_URL = "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList"        # e약은요 (보조)
 HTFS_URL = "https://apis.data.go.kr/1471000/HtfsInfoService03/getHtfsItem01"                        # 건강기능식품
 COSM_URL = "https://apis.data.go.kr/1471000/FtnltCosmRptPrdlstInfoService01/getRptPrdlstInq01"        # 기능성화장품 보고품목
+COSM_SRNG_URL = "https://apis.data.go.kr/1471057/FtnltCosmSrngPrdlstInfoService05/getSrngPrdlstInq05"  # 기능성화장품 심사품목
 
 # 언어명 → (BCP-47 TTS 코드, 성조/발음 특성 메모)
 LANGUAGES = {
@@ -107,12 +108,54 @@ def search_htfs(q: str, rows: int = 6) -> list[dict]:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def search_cosm(q: str, rows: int = 8) -> list[dict]:
+    """기능성화장품: 보고품목 + 심사품목 둘 다 조회"""
     for v in search_variants(q):
-        items = _get(COSM_URL, {"item_name": v, "numOfRows": rows})
-        items = [it for it in items if it.get("CANCEL_APPROVAL_YN") != "Y"]  # 취하된 보고 제외
-        if items:
-            return [{"kind": "기능성화장품", "name": it.get("ITEM_NAME", ""), "maker": it.get("ENTP_NAME", ""), "raw": it} for it in items]
+        out, seen = [], set()
+        try:
+            rpt = [it for it in _get(COSM_URL, {"item_name": v, "numOfRows": rows}) if it.get("CANCEL_APPROVAL_YN") != "Y"]
+        except Exception:
+            rpt = []
+        for it in rpt:
+            it["_src"] = "보고"
+            seen.add(it.get("ITEM_NAME", "").replace(" ", ""))
+            out.append(it)
+        try:
+            srng = _get(COSM_SRNG_URL, {"item_name": v, "numOfRows": rows})
+        except Exception:
+            srng = []
+        for it in srng:
+            nm = it.get("ITEM_NAME", "").replace(" ", "")
+            if nm and nm not in seen:
+                it["_src"] = "심사"
+                out.append(it)
+        if out:
+            return [{"kind": "기능성화장품", "name": it.get("ITEM_NAME", ""), "maker": it.get("ENTP_NAME", ""), "raw": it} for it in out]
     return []
+
+
+WEB_INGR_SYSTEM = """한국 화장품의 전성분을 웹에서 찾아 정리합니다. 구글 검색으로 "제품명 전성분"을 찾아
+반드시 해당 제품(제품명·제조사가 일치)의 전성분만 사용하세요. 다른 제품이나 확신이 없으면 found=false.
+JSON만 반환: {"found": true/false, "ingredients": "전성분을 표시 순서대로 쉼표로 이어 쓴 문자열",
+ "disclosed_amounts": "회사가 공개한 함량이 있으면 (예: PDRN 2%), 없으면 빈 문자열",
+ "source": "출처 사이트명 또는 URL"}"""
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def web_ingredients(name: str, maker: str) -> dict:
+    """Gemini 구글 검색으로 전성분 찾기. 출처 표시용."""
+    resp = client.models.generate_content(
+        model=MODEL,
+        contents=f"제품명: {name}\n제조·판매사: {maker}\n이 제품의 전성분과 공개된 함량을 찾아 JSON으로.",
+        config=types.GenerateContentConfig(
+            system_instruction=WEB_INGR_SYSTEM,
+            tools=[types.Tool(google_search=types.GoogleSearch())],
+            thinking_config=types.ThinkingConfig(thinking_level="low"),
+        ),
+    )
+    raw = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.M).strip()
+    raw = raw[raw.find("{"):]
+    obj, _ = json.JSONDecoder().raw_decode(raw)
+    return obj
 
 
 def search_all(q: str) -> tuple[list[dict], dict]:
@@ -216,8 +259,11 @@ def build_cosm_text(c: dict, ingredients: str = "") -> str:
         "'바른다/사용한다' 표현, '복용' 금지)",
         f"[제품명] {clean(c.get('ITEM_NAME'))}",
         f"[책임판매업체] {clean(c.get('ENTP_NAME'))}",
-        f"[식약처 보고 기능성] {clean(c.get('EE_NAME'))}",
+        f"[식약처 {c.get('_src','보고')} 기능성] {clean(c.get('EE_NAME')) or doc_text(c.get('EE_DOC_DATA')) or '기능성화장품(세부 기능성 문구 없음)'}",
     ]
+    ud = doc_text(c.get("UD_DOC_DATA"))
+    if ud and not c.get("USAGE_DOSAGE"):
+        lines.append(f"[사용법(심사 문서)] {ud[:600]}")
     if c.get("SPF") or c.get("PA"):
         lines.append(f"[자외선차단] SPF {c.get('SPF') or '-'} / PA {c.get('PA') or '-'}")
     if c.get("USAGE_DOSAGE"):
@@ -225,7 +271,7 @@ def build_cosm_text(c: dict, ingredients: str = "") -> str:
     if c.get("REPORT_DATE"):
         lines.append(f"[보고일] {c['REPORT_DATE']}")
     if ingredients.strip():
-        lines.append(f"[전성분(포장 표시, 약사가 입력)] {clean(ingredients)[:1500]}")
+        lines.append(f"[전성분] {clean(ingredients)[:1500]}")
     else:
         lines.append("[전성분] 제공되지 않음 — 성분 설명은 하지 말고 ingredients는 빈 배열")
     return "\n".join(lines)
@@ -377,10 +423,32 @@ if query:
             st.info("건강기능식품 — 안내문과 발음 카드는 '~에 도움을 줄 수 있어요' 표현으로 생성됩니다.")
         else:
             easy = None
-            st.info(f"기능성화장품 — 식약처 보고 기능성: {clean(raw.get('EE_NAME'))}")
-            ingr_text = st.text_area("전성분 붙여넣기 (선택) — 포장의 전성분표를 입력하면 주요 성분 설명이 추가됩니다", height=90)
+            fn = clean(raw.get("EE_NAME")) or doc_text(raw.get("EE_DOC_DATA")) or "기능성화장품"
+            st.info(f"기능성화장품 (식약처 {raw.get('_src','보고')}) — {fn}")
+            st.caption("화장품 성분·함량은 식약처 데이터에 없습니다. 아래 둘 중 하나로 넣으면 주요 성분 설명이 추가돼요.")
+            c_a, c_b = st.columns([1, 2])
+            use_web = c_a.button("🌐 웹에서 전성분 찾기")
+            ingr_text = c_b.text_area("또는 포장의 전성분 붙여넣기", height=70, label_visibility="collapsed",
+                                      placeholder="또는 포장의 전성분표를 여기에 붙여넣기")
+            web_note = ""
+            if use_web or st.session_state.get("web_ingr_for") == chosen["name"]:
+                st.session_state["web_ingr_for"] = chosen["name"]
+                with st.spinner("웹에서 전성분 찾는 중…"):
+                    try:
+                        w = web_ingredients(chosen["name"], chosen["maker"])
+                    except Exception as e:
+                        w = {"found": False, "error": str(e)}
+                if w.get("found") and w.get("ingredients"):
+                    if not ingr_text.strip():
+                        ingr_text = w["ingredients"]
+                    if w.get("disclosed_amounts"):
+                        ingr_text += f"\n[회사 공개 함량] {w['disclosed_amounts']}"
+                    web_note = f" · 전성분: 웹 출처({w.get('source','')}) — 포장과 대조 필요"
+                    st.warning(f"웹에서 찾은 전성분 (출처: {w.get('source','')}) — 포장과 대조해서 확인하세요.\n\n{w['ingredients'][:400]}{'…' if len(w['ingredients'])>400 else ''}")
+                else:
+                    st.caption("웹에서 확실한 전성분을 찾지 못했어요. 포장의 전성분을 붙여넣어 주세요.")
             source_text = build_cosm_text(raw, ingr_text)
-            basis = "식약처 기능성화장품 보고품목정보" + (" + 포장 전성분" if ingr_text.strip() else "")
+            basis = f"식약처 기능성화장품 {raw.get('_src','보고')}품목정보" + (web_note or (" + 포장 전성분" if ingr_text.strip() else ""))
 
         with st.expander("식약처 원문 보기"):
             st.text(source_text)
