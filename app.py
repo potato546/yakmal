@@ -133,26 +133,50 @@ def search_cosm(q: str, rows: int = 8) -> list[dict]:
     return []
 
 
-WEB_INGR_SYSTEM = """한국 화장품의 전성분을 웹에서 찾아 정리합니다. 구글 검색을 여러 번(제품명 전성분 / 제품명 성분 / 제조사 제품명 / 영문명) 해서
-해당 제품의 전성분을 찾으세요. 제조사 공식 사이트, 올리브영·화해·쿠팡 등 판매 페이지의 전성분 표기를 우선합니다.
-전체 전성분을 못 찾았더라도 기사나 홈페이지에서 확인되는 주요 성분이 있으면 partial=true로 그것만 정리하세요.
-다른 제품 것을 섞지 마세요. 정말 아무것도 없을 때만 found=false.
+import os
+
+INGR_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cosmetic_ingredients.txt")
+
+
+def load_ingredient_file() -> dict[str, str]:
+    """cosmetic_ingredients.txt: '제품명 | 전성분' 한 줄씩. 제품명은 띄어쓰기 무시하고 부분일치."""
+    table = {}
+    if not os.path.exists(INGR_FILE):
+        return table
+    with open(INGR_FILE, encoding="utf-8") as f:
+        for line in f:
+            t = line.strip()
+            if not t or t.startswith("#") or "|" not in t:
+                continue
+            name, ingr = t.split("|", 1)
+            table[name.strip().replace(" ", "")] = ingr.strip()
+    return table
+
+
+def file_ingredients(product_name: str) -> str:
+    key = product_name.replace(" ", "")
+    for name, ingr in load_ingredient_file().items():
+        if name in key or key in name:
+            return ingr
+    return ""
+
+
+PHOTO_SYSTEM = """화장품 포장 사진에서 전성분 표기를 읽어 정리합니다.
+'전성분' 또는 'Ingredients' 뒤에 나오는 성분 목록을 표시된 순서 그대로, 쉼표로 구분해 한 줄로 옮기세요.
+사진에 보이는 그대로만 적고 추측해서 채우지 마세요. 흐려서 못 읽는 부분은 (판독불가)로 표시.
+회사가 표시한 함량(예: 나이아신아마이드 2%)이 보이면 그대로 포함.
 JSON만 반환 (마크다운 펜스 금지):
-{"found": true/false, "partial": true/false,
- "ingredients": "전성분(또는 확인된 주요 성분)을 표시 순서대로 쉼표로 이어 쓴 문자열",
- "disclosed_amounts": "회사가 공개한 함량이 있으면 (예: PDRN 2%), 없으면 빈 문자열",
- "source": "출처 사이트명 또는 URL", "note": "확인 범위나 주의점 한 줄"}"""
+{"found": true/false, "product_name": "사진에서 보이는 제품명(없으면 빈 문자열)",
+ "ingredients": "성분1, 성분2, ...", "note": "판독 상태 한 줄"}"""
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def web_ingredients(name: str, maker: str) -> dict:
-    """Gemini 구글 검색으로 전성분 찾기. 출처 표시용."""
+def read_ingredients_from_photo(img_bytes: bytes, mime: str) -> dict:
     resp = client.models.generate_content(
         model=MODEL,
-        contents=f"제품명: {name}\n제조·판매사: {maker}\n이 제품의 전성분과 공개된 함량을 찾아 JSON으로.",
+        contents=[types.Part.from_bytes(data=img_bytes, mime_type=mime), "이 사진의 전성분을 읽어 JSON으로."],
         config=types.GenerateContentConfig(
-            system_instruction=WEB_INGR_SYSTEM,
-            tools=[types.Tool(google_search=types.GoogleSearch())],
+            system_instruction=PHOTO_SYSTEM,
+            response_mime_type="application/json",
             thinking_config=types.ThinkingConfig(thinking_level="low"),
         ),
     )
@@ -160,101 +184,6 @@ def web_ingredients(name: str, maker: str) -> dict:
     raw = raw[raw.find("{"):]
     obj, _ = json.JSONDecoder().raw_decode(raw)
     return obj
-
-
-def search_all(q: str) -> tuple[list[dict], dict]:
-    """의약품·건기식·기능성화장품 동시 검색. (결과, 소스별 오류) 반환"""
-    errors = {}
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        futs = {"의약품": ex.submit(search_drug, q), "건강기능식품": ex.submit(search_htfs, q),
-                "기능성화장품": ex.submit(search_cosm, q)}
-    results = []
-    for kind, f in futs.items():
-        try:
-            results += f.result()
-        except Exception as e:
-            errors[kind] = str(e)
-    return results, errors
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def easy_by_seq(item_seq: str) -> dict | None:
-    try:
-        items = _get(EASY_DRUG_URL, {"itemSeq": item_seq, "numOfRows": 1})
-        return items[0] if items else None
-    except Exception:
-        return None
-
-
-def doc_text(xml: str | None) -> str:
-    if not xml:
-        return ""
-    t = re.sub(r"<!\[CDATA\[|\]\]>", "", xml)
-    t = re.sub(r"<[^>]+>", " ", t)
-    return re.sub(r"\s+", " ", t).strip()
-
-
-def parse_material(material: str | None) -> list[str]:
-    out = []
-    for chunk in (material or "").split(";"):
-        kv = {}
-        for part in chunk.split("|"):
-            if ":" in part:
-                k, v = part.split(":", 1)
-                kv[k.strip()] = v.strip()
-        name = kv.get("성분명")
-        if name:
-            amt = f"{kv.get('분량', '')}{kv.get('단위', '')}".strip()
-            out.append(f"{name} {amt}".strip())
-    return out
-
-
-def strip_html(s: str | None) -> str:
-    return re.sub(r"<[^>]+>", "", s or "").strip()
-
-
-def clean(s: str | None) -> str:
-    return re.sub(r"\s+", " ", s or "").strip()
-
-
-def build_drug_text(permit: dict, easy: dict | None) -> str:
-    lines = [
-        f"[제품군] 의약품 — {permit.get('ETC_OTC_CODE','')}",
-        f"[제품명] {permit.get('ITEM_NAME','')}",
-        f"[제조사] {permit.get('ENTP_NAME','')}",
-    ]
-    ingr = parse_material(permit.get("MATERIAL_NAME"))
-    if ingr:
-        lines.append("[주성분(허가정보)] " + ", ".join(ingr))
-    for label, key, limit in [("효능효과(허가사항)", "EE_DOC_DATA", 1500),
-                              ("용법용량(허가사항)", "UD_DOC_DATA", 1200),
-                              ("사용상 주의사항(허가사항)", "NB_DOC_DATA", 2500)]:
-        t = doc_text(permit.get(key))
-        if t:
-            lines.append(f"[{label}] {t[:limit]}")
-    if easy:
-        for label, key in [("효능(쉬운설명)", "efcyQesitm"), ("용법(쉬운설명)", "useMethodQesitm"),
-                           ("주의사항(쉬운설명)", "atpnQesitm"), ("상호작용(쉬운설명)", "intrcQesitm"),
-                           ("부작용(쉬운설명)", "seQesitm")]:
-            t = strip_html(easy.get(key))
-            if t:
-                lines.append(f"[{label}] {t}")
-    return "\n".join(lines)
-
-
-def build_htfs_text(h: dict) -> str:
-    lines = [
-        "[제품군] 건강기능식품 (의약품 아님 — 질병 치료·예방 표현 금지, 식약처 인정 기능성 문구 '~에 도움을 줄 수 있음'만 사용)",
-        f"[제품명] {clean(h.get('PRDUCT'))}",
-        f"[제조사] {clean(h.get('ENTRPS'))}",
-    ]
-    for label, key in [("기능성 내용(식약처 인정)", "MAIN_FNCTN"), ("섭취량·섭취방법", "SRV_USE"),
-                       ("섭취 시 주의사항", "INTAKE_HINT1"), ("성상", "SUNGSANG"),
-                       ("보관방법", "PRSRV_PD"), ("유통기한", "DISTB_PD"), ("기준규격", "BASE_STANDARD")]:
-        t = clean(h.get(key))
-        if t:
-            lines.append(f"[{label}] {t[:1200]}")
-    return "\n".join(lines)
 
 
 def build_cosm_text(c: dict, ingredients: str = "") -> str:
@@ -388,6 +317,61 @@ def pair(v) -> tuple[str, str]:
     return str(v or ""), ""
 
 
+def render_phrases(phrases: list[dict], language: str):
+    phrases = [p for p in (phrases or []) if isinstance(p, dict)]
+    tts_code = LANGUAGES.get(language, ("en-US", ""))[0]
+    gl = GTTS_LANG.get(language)
+    audios = make_all_audio([str(p.get("native", "")) for p in phrases], gl) if gl else [None] * len(phrases)
+    last_group = None
+    for p, audio in zip(phrases, audios):
+        if p.get("group") and p.get("group") != last_group:
+            st.markdown(f"**▸ {p['group']}**")
+            last_group = p["group"]
+        with st.container(border=True):
+            st.markdown(f"**{p.get('ko','')}**")
+            st.markdown(f"<span style='font-size:1.6em'>{p.get('native','')}</span>", unsafe_allow_html=True)
+            st.markdown(f"`{p.get('roman','')}` · **{p.get('hangul','')}**")
+            st.caption(f"💡 {p.get('tip','')}")
+            if audio:
+                st.audio(audio, format="audio/mp3")
+            else:
+                tts_button(str(p.get("native", "")), tts_code)
+
+
+# ---------- 듣기 모드 (고객 음성 → 이해 + 답할 말) ----------
+LISTEN_SYSTEM = """외국인 고객이 한국 약국에서 말한 음성입니다. 약사가 이해하고 바로 답할 수 있게 정리하세요.
+JSON만 반환 (마크다운 펜스 금지):
+{"language": "아래 목록 중 하나, 없으면 '기타'", 
+ "transcript": "고객이 말한 원문 (그 언어 그대로)",
+ "korean": "한국어 번역",
+ "summary_ko": "고객이 원하는 것 한 문장 (증상, 찾는 제품, 질문)",
+ "search_terms": ["제품 검색에 쓸 한국어 키워드 1~3개 (증상명 또는 제품군, 예: 설사, 지사제, 두통약)"],
+ "reply_phrases": [ 약사가 지금 바로 그 언어로 말하면 좋은 단어·짧은 구 5~6개.
+   (a) 확인 2개: 증상 되묻기·기간·다른 약 복용 여부 (예: 언제부터요?, 다른 약 드세요?)
+   (b) 안내 2개: 상황에 맞는 일반 안내 (예: 잠시만요, 이 약이 있어요, 하루 세 번)
+   (c) 공감 1~2개: (예: 많이 힘드셨겠어요, 괜찮아질 거예요)
+   각 항목: {"group": "확인"|"안내"|"공감", "ko": 한국어, "native": 그 언어 표기, "roman": 로마자(성조 부호 포함),
+            "hangul": 한글 근사 발음, "tip": 발음 팁 한 줄} ]}
+언어 목록: """ + ", ".join(LANGUAGES.keys()) + """
+광둥어는 native를 번체자 홍콩 구어체로, roman은 Jyutping으로. 음성이 한국어면 language를 '한국어'로 하고 reply_phrases는 빈 배열."""
+
+
+def listen_and_reply(audio_bytes: bytes, mime: str) -> dict:
+    resp = client.models.generate_content(
+        model=MODEL,
+        contents=[types.Part.from_bytes(data=audio_bytes, mime_type=mime), "이 음성을 듣고 JSON으로 정리."],
+        config=types.GenerateContentConfig(
+            system_instruction=LISTEN_SYSTEM,
+            response_mime_type="application/json",
+            thinking_config=types.ThinkingConfig(thinking_level="low"),
+        ),
+    )
+    raw = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.M).strip()
+    raw = raw[raw.find("{"):]
+    obj, _ = json.JSONDecoder().raw_decode(raw)
+    return obj
+
+
 # ---------- 화면 ----------
 st.set_page_config(page_title="약말", page_icon="💊", layout="wide")
 st.title("💊 약말 — 외국인 복약안내 + 약사 발음 도우미")
@@ -396,9 +380,34 @@ if not DATA_GO_KR_KEY or not GEMINI_API_KEY:
     st.warning("Secrets에 DATA_GO_KR_KEY, GEMINI_API_KEY를 넣어주세요.")
     st.stop()
 
-col_q, col_l = st.columns([3, 1])
-query = col_q.text_input("제품명 검색 (예: 타이레놀, 우황청심원, 홍삼정, 리쥬올)")
+col_m, col_l = st.columns([3, 1])
+mode = col_m.radio("모드", ["제품 검색", "🎤 고객 말 듣기"], horizontal=True, label_visibility="collapsed")
 language = col_l.selectbox("고객 언어", list(LANGUAGES))
+
+if mode == "🎤 고객 말 듣기":
+    st.caption("고객이 말하는 동안 녹음하고 멈추면, 무슨 말인지와 바로 답할 발음 카드가 나옵니다.")
+    rec = st.audio_input("녹음")
+    if rec is not None:
+        with st.spinner("듣는 중…"):
+            try:
+                L = listen_and_reply(rec.getvalue(), rec.type or "audio/wav")
+            except Exception as e:
+                st.error(f"인식 실패: {e}")
+                st.stop()
+        lang_detected = L.get("language", "기타")
+        st.markdown(f"**감지 언어:** {lang_detected}")
+        st.markdown(f"**고객 말:** {L.get('transcript','')}")
+        st.markdown(f"**한국어:** {L.get('korean','')}")
+        st.info(f"원하는 것: {L.get('summary_ko','')}")
+        terms = [t for t in (L.get("search_terms") or []) if isinstance(t, str)]
+        if terms:
+            st.caption("제품 검색 키워드: " + " · ".join(terms) + "  → 위에서 '제품 검색' 모드로 바꿔 검색하세요")
+        st.subheader("🗣️ 지금 바로 답하기")
+        lang_for_cards = lang_detected if lang_detected in LANGUAGES else language
+        render_phrases(L.get("reply_phrases"), lang_for_cards)
+    st.stop()
+
+query = st.text_input("제품명 검색 (예: 타이레놀, 우황청심원, 홍삼정, 리쥬올)")
 
 if query:
     with st.spinner("식약처 조회 중 (의약품 + 건강기능식품 + 기능성화장품)…"):
@@ -429,35 +438,36 @@ if query:
             easy = None
             fn = clean(raw.get("EE_NAME")) or doc_text(raw.get("EE_DOC_DATA")) or "기능성화장품"
             st.info(f"기능성화장품 (식약처 {raw.get('_src','보고')}) — {fn}")
-            st.caption("화장품 성분·함량은 식약처 데이터에 없습니다. 아래 둘 중 하나로 넣으면 주요 성분 설명이 추가돼요.")
-            c_a, c_b = st.columns([1, 2])
-            use_web = c_a.button("🌐 웹에서 전성분 찾기")
-            ingr_text = c_b.text_area("또는 포장의 전성분 붙여넣기", height=70, label_visibility="collapsed",
-                                      placeholder="또는 포장의 전성분표를 여기에 붙여넣기")
-            web_note = ""
-            if use_web or st.session_state.get("web_ingr_for") == chosen["name"]:
-                st.session_state["web_ingr_for"] = chosen["name"]
-                with st.spinner("웹에서 전성분 찾는 중…"):
-                    try:
-                        w = web_ingredients(chosen["name"], chosen["maker"])
-                    except Exception as e:
-                        w = {"found": False, "error": str(e)}
-                if w.get("found") and w.get("ingredients"):
-                    if not ingr_text.strip():
-                        ingr_text = w["ingredients"]
-                    if w.get("disclosed_amounts"):
-                        ingr_text += f"\n[회사 공개 함량] {w['disclosed_amounts']}"
-                    tag = "주요 성분 일부" if w.get("partial") else "전성분"
-                    web_note = f" · {tag}: 웹 출처({w.get('source','')}) — 포장과 대조 필요"
-                    st.warning(f"웹에서 찾은 {tag} (출처: {w.get('source','')}) — 포장과 대조해서 확인하세요.\n\n"
-                               f"{w['ingredients'][:400]}{'…' if len(w['ingredients'])>400 else ''}"
-                               + (f"\n\n{w['note']}" if w.get("note") else ""))
-                elif w.get("error"):
-                    st.error(f"웹 검색 오류: {w['error'][:300]}")
-                else:
-                    st.caption("웹에서 성분을 찾지 못했어요. 포장의 전성분을 붙여넣어 주세요." + (f" ({w['note']})" if w.get("note") else ""))
+            st.caption("화장품 성분·함량은 식약처 데이터에 없습니다. 파일 등록 → 사진 → 붙여넣기 순으로 찾습니다.")
+            ingr_text = file_ingredients(chosen["name"])
+            src_label = ""
+            if ingr_text:
+                src_label = " + 등록 파일 전성분"
+                st.success("등록된 전성분을 사용합니다 (cosmetic_ingredients.txt)")
+            else:
+                photo = st.camera_input("📷 포장의 전성분 부분을 촬영 (또는 아래에서 파일 선택)")
+                upload = st.file_uploader("전성분 사진 파일", type=["jpg", "jpeg", "png", "webp"], label_visibility="collapsed")
+                img = photo or upload
+                if img is not None:
+                    with st.spinner("사진에서 전성분 읽는 중…"):
+                        try:
+                            r = read_ingredients_from_photo(img.getvalue(), img.type or "image/jpeg")
+                        except Exception as e:
+                            r = {"found": False, "note": str(e)[:200]}
+                    if r.get("found") and r.get("ingredients"):
+                        ingr_text = r["ingredients"]
+                        src_label = " + 포장 촬영 전성분"
+                        st.info(f"사진에서 읽은 전성분 — 포장과 대조해 확인하세요. {r.get('note','')}\n\n{ingr_text[:400]}{'…' if len(ingr_text)>400 else ''}")
+                        st.code(f"{chosen['name']} | {ingr_text}", language=None)
+                        st.caption("↑ 이 줄을 cosmetic_ingredients.txt에 넣어두면 다음부턴 촬영 없이 자동으로 씁니다.")
+                    else:
+                        st.warning(f"전성분을 읽지 못했어요. {r.get('note','')} 전성분 글자가 크게 나오도록 다시 찍거나 아래에 붙여넣어 주세요.")
+                pasted = st.text_area("또는 전성분 붙여넣기", height=70, placeholder="포장의 전성분표를 여기에 붙여넣기")
+                if pasted.strip():
+                    ingr_text = pasted
+                    src_label = " + 붙여넣은 전성분"
             source_text = build_cosm_text(raw, ingr_text)
-            basis = f"식약처 기능성화장품 {raw.get('_src','보고')}품목정보" + (web_note or (" + 포장 전성분" if ingr_text.strip() else ""))
+            basis = f"식약처 기능성화장품 {raw.get('_src','보고')}품목정보" + src_label
 
         with st.expander("식약처 원문 보기"):
             st.text(source_text)
@@ -503,20 +513,4 @@ if query:
 
         with right:
             st.subheader("🗣️ 약사가 직접 말하기")
-            phrases = [p for p in (out.get("key_phrases") or []) if isinstance(p, dict)]
-            gl = GTTS_LANG.get(language)
-            audios = make_all_audio([str(p.get("native", "")) for p in phrases], gl) if gl else [None] * len(phrases)
-            last_group = None
-            for p, audio in zip(phrases, audios):
-                if p.get("group") and p.get("group") != last_group:
-                    st.markdown(f"**▸ {p['group']}**")
-                    last_group = p["group"]
-                with st.container(border=True):
-                    st.markdown(f"**{p.get('ko','')}**")
-                    st.markdown(f"<span style='font-size:1.6em'>{p.get('native','')}</span>", unsafe_allow_html=True)
-                    st.markdown(f"`{p.get('roman','')}` · **{p.get('hangul','')}**")
-                    st.caption(f"💡 {p.get('tip','')}")
-                    if audio:
-                        st.audio(audio, format="audio/mp3")
-                    else:
-                        tts_button(str(p.get("native", "")), tts_code)
+            render_phrases(out.get("key_phrases"), language)
