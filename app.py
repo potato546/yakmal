@@ -17,9 +17,8 @@ from gtts import gTTS
 #  - Streamlit Cloud: 앱 설정 > Secrets 에 입력
 DATA_GO_KR_KEY = st.secrets.get("DATA_GO_KR_KEY", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
-# 네이버 API HUB 키 — Secrets에 없으면 아래 값을 씀 (깃허브 저장소는 Private로 두세요)
-NAVER_CLIENT_ID = st.secrets.get("NAVER_CLIENT_ID", "mtibss12ru")
-NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "0Fh90fU9r3Q4LWX9XcrpTkc1zobJeJn3p0f0G6Hy")
+NAVER_CLIENT_ID = st.secrets.get("NAVER_CLIENT_ID", "")
+NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
 NAVER_BASE = "https://naverapihub.apigw.ntruss.com/search/v1"  # NAVER API HUB (네이버클라우드)
 
 MODEL = "gemini-3.1-flash-lite"  # 텍스트 생성용 (무료 한도 넉넉)
