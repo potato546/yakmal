@@ -409,8 +409,8 @@ if mode == "🎤 고객 말 듣기":
     with t_rec:
         rec = st.audio_input("녹음")
     with t_img:
-        cam = st.camera_input("촬영")
-        up = st.file_uploader("사진 파일", type=["jpg", "jpeg", "png", "webp"], label_visibility="collapsed")
+        up = st.file_uploader("사진 파일 선택 (갤러리·스크린샷)", type=["jpg", "jpeg", "png", "webp"])
+        cam = st.camera_input("촬영") if st.toggle("📷 카메라 켜기", key="cam_listen") else None
     img = cam or up
     src = None
     if img is not None:
@@ -477,8 +477,8 @@ if query:
                 src_label = " + 등록 파일 전성분"
                 st.success("등록된 전성분을 사용합니다 (cosmetic_ingredients.txt)")
             else:
-                photo = st.camera_input("📷 포장의 전성분 부분을 촬영 (또는 아래에서 파일 선택)")
-                upload = st.file_uploader("전성분 사진 파일", type=["jpg", "jpeg", "png", "webp"], label_visibility="collapsed")
+                upload = st.file_uploader("전성분 사진 파일 선택", type=["jpg", "jpeg", "png", "webp"])
+                photo = st.camera_input("포장의 전성분 부분을 촬영") if st.toggle("📷 카메라 켜기", key="cam_cosm") else None
                 img = photo or upload
                 if img is not None:
                     with st.spinner("사진에서 전성분 읽는 중…"):
