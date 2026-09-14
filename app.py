@@ -262,250 +262,56 @@ def fetch_text(url: str, limit: int = 6000) -> str:
         return ""
 
 
-NAVER_INGR_SYSTEM = """네이버 검색 결과와 페이지 본문에서 특정 화장품의 정보를 뽑습니다.
-반드시 해당 제품(제품명이 일치)의 것만 사용. 다른 제품 것은 섞지 말 것.
-JSON만 반환 (마크다운 펜스 금지):
-{"found": true/false, "partial": true/false,
- "ingredients": "전성분(또는 확인된 주요 성분)을 표시 순서대로 쉼표로 이어 쓴 문자열",
- "disclosed_amounts": "회사가 공개한 함량 (예: PDRN 2%), 없으면 빈 문자열",
- "texture": "제형·사용감 (예: 젤 크림, 가벼움, 끈적임 없음) 한 줄. 광고 표현 제외",
- "source": "출처 페이지 제목 또는 URL", "note": "확인 범위·주의 한 줄"}"""
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def naver_ingredients(name: str, maker: str) -> dict:
-    hits = []
-    for q in (f"{name} 전성분", f"{name} 성분"):
-        for kind in ("webkr", "blog"):
-            try:
-                hits += naver_search(kind, q, display=10)
-            except Exception:
-                pass
-    seen, pages = set(), []
-    for h in hits:
-        link = h.get("link", "")
-        if not link or link in seen:
-            continue
-        seen.add(link)
-        body = fetch_text(link, 5000)
-        if "전성분" in body or "성분" in body:
-            pages.append(f"### {clean(strip_html(h.get('title','')))} ({link})\n{body}")
-        if len(pages) >= 5:
-            break
-    if not pages:
-        return {"found": False, "note": "검색 결과에서 성분 텍스트를 찾지 못함"}
-    ctx = f"제품명: {name} / 판매사: {maker}\n\n" + "\n\n".join(pages)
-    resp = client.models.generate_content(
-        model=MODEL, contents=ctx[:30000],
-        config=types.GenerateContentConfig(system_instruction=NAVER_INGR_SYSTEM, response_mime_type="application/json",
-                                           thinking_config=types.ThinkingConfig(thinking_level="low")),
-    )
-    raw = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.M).strip()
-    raw = raw[raw.find("{"):]
-    obj, _ = json.JSONDecoder().raw_decode(raw)
-    return obj
-
-
-REVIEW_SYSTEM = """약사가 참고할 실사용 후기 요약을 만듭니다. 입력은 네이버 블로그·카페 글 목록(제목·요약)입니다.
-협찬·광고·판매 목적 글("협찬", "제공받아", "광고", "공동구매", 지나친 찬사, 구매 링크 유도)은 제외하고 개인 경험담만 사용.
-고객에게 보여주는 글이 아니라 약사 내부 참고용. 효능 근거로 쓰지 말 것을 전제로, 담백하게.
-JSON만 반환 (마크다운 펜스 금지):
-{"used": 사용한 글 수, "excluded_ads": 제외한 협찬 의심 글 수,
- "effects": ["체감 효과로 자주 언급된 것 (몇 건인지 괄호로)", ...],
- "side_effects": ["부작용·불편으로 언급된 것 (건수)", ...],
- "tips": ["복용·사용 팁, 사용감, 제형 등", ...],
- "caution": "약사가 주의해서 볼 점 한 줄 (예: 졸림 언급이 많음)"}"""
-
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def naver_reviews(name: str, kind_label: str) -> dict:
-    hits = []
-    for q in (f"{name} 후기", f"{name} 부작용" if kind_label != "기능성화장품" else f"{name} 사용감"):
-        for k in ("blog", "cafearticle"):
-            try:
-                hits += naver_search(k, q, display=20)
-            except Exception:
-                pass
-    seen, lines = set(), []
-    for h in hits:
-        link = h.get("link", "")
-        if link in seen:
-            continue
-        seen.add(link)
-        lines.append(f"- [{clean(strip_html(h.get('title','')))}] {clean(strip_html(h.get('description','')))} ({h.get('postdate') or h.get('pubDate','')})")
-    if not lines:
-        return {"used": 0, "excluded_ads": 0, "effects": [], "side_effects": [], "tips": [], "caution": "후기를 찾지 못함"}
-    ctx = f"제품: {name} ({kind_label})\n\n" + "\n".join(lines[:60])
-    resp = client.models.generate_content(
-        model=MODEL, contents=ctx,
-        config=types.GenerateContentConfig(system_instruction=REVIEW_SYSTEM, response_mime_type="application/json",
-                                           thinking_config=types.ThinkingConfig(thinking_level="low")),
-    )
-    raw = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.M).strip()
-    raw = raw[raw.find("{"):]
-    obj, _ = json.JSONDecoder().raw_decode(raw)
-    return obj
-
-
-def render_reviews(name: str, kind_label: str):
-    if not naver_ok():
-        return
-    with st.expander("📝 약사 참고: 실사용 후기 요약 (네이버 블로그·카페) — 고객 안내에는 사용되지 않음"):
-        if st.button("후기 모아 보기", key=f"rv_{name}"):
-            with st.spinner("후기 수집·정리 중…"):
-                try:
-                    R = naver_reviews(name, kind_label)
-                except Exception as e:
-                    st.error(f"후기 조회 실패: {str(e)[:200]}")
-                    return
-            st.caption(f"개인 경험담 {R.get('used',0)}건 요약 · 협찬 의심 {R.get('excluded_ads',0)}건 제외 · 효능·안전성 근거 아님")
-            for label, k in [("체감 효과", "effects"), ("부작용·불편", "side_effects"), ("팁·사용감", "tips")]:
-                items = [x for x in (R.get(k) or []) if isinstance(x, str)]
-                if items:
-                    st.markdown(f"**{label}**")
-                    for x in items:
-                        st.markdown(f"- {x}")
-            if R.get("caution"):
-                st.warning(R["caution"])
-
-import os
-
-INGR_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cosmetic_ingredients.txt")
-
-
-def load_ingredient_file() -> dict[str, str]:
-    """cosmetic_ingredients.txt: '제품명 | 전성분' 한 줄씩. 제품명은 띄어쓰기 무시하고 부분일치."""
-    table = {}
-    if not os.path.exists(INGR_FILE):
-        return table
-    with open(INGR_FILE, encoding="utf-8") as f:
-        for line in f:
-            t = line.strip()
-            if not t or t.startswith("#") or "|" not in t:
-                continue
-            name, ingr = t.split("|", 1)
-            table[name.strip().replace(" ", "")] = ingr.strip()
-    return table
-
-
-def file_ingredients(product_name: str) -> str:
-    key = product_name.replace(" ", "")
-    for name, ingr in load_ingredient_file().items():
-        if name in key or key in name:
-            return ingr
-    return ""
-
-
-PHOTO_SYSTEM = """화장품 포장 사진에서 전성분 표기를 읽어 정리합니다.
-'전성분' 또는 'Ingredients' 뒤에 나오는 성분 목록을 표시된 순서 그대로, 쉼표로 구분해 한 줄로 옮기세요.
-사진에 보이는 그대로만 적고 추측해서 채우지 마세요. 흐려서 못 읽는 부분은 (판독불가)로 표시.
-회사가 표시한 함량(예: 나이아신아마이드 2%)이 보이면 그대로 포함.
-JSON만 반환 (마크다운 펜스 금지):
-{"found": true/false, "product_name": "사진에서 보이는 제품명(없으면 빈 문자열)",
- "ingredients": "성분1, 성분2, ...", "note": "판독 상태 한 줄"}"""
-
-
-def read_ingredients_from_photo(img_bytes: bytes, mime: str) -> dict:
-    resp = client.models.generate_content(
-        model=MODEL,
-        contents=[types.Part.from_bytes(data=img_bytes, mime_type=mime), "이 사진의 전성분을 읽어 JSON으로."],
-        config=types.GenerateContentConfig(
-            system_instruction=PHOTO_SYSTEM,
-            response_mime_type="application/json",
-            thinking_config=types.ThinkingConfig(thinking_level="low"),
-        ),
-    )
-    raw = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.M).strip()
-    raw = raw[raw.find("{"):]
-    obj, _ = json.JSONDecoder().raw_decode(raw)
-    return obj
-
-
-def build_cosm_text(c: dict, ingredients: str = "") -> str:
-    lines = [
-        "[제품군] 기능성화장품 (의약품 아님 — 치료·개선 단정 표현 금지. 식약처에 보고된 기능성 문구 '~에 도움을 준다'만 사용. "
-        "'바른다/사용한다' 표현, '복용' 금지)",
-        f"[제품명] {clean(c.get('ITEM_NAME'))}",
-        f"[책임판매업체] {clean(c.get('ENTP_NAME'))}",
-        f"[식약처 {c.get('_src','보고')} 기능성] {clean(c.get('EE_NAME')) or doc_text(c.get('EE_DOC_DATA')) or '기능성화장품(세부 기능성 문구 없음)'}",
-    ]
-    ud = doc_text(c.get("UD_DOC_DATA"))
-    if ud and not c.get("USAGE_DOSAGE"):
-        lines.append(f"[사용법(심사 문서)] {ud[:600]}")
-    if c.get("SPF") or c.get("PA"):
-        lines.append(f"[자외선차단] SPF {c.get('SPF') or '-'} / PA {c.get('PA') or '-'}")
-    if c.get("USAGE_DOSAGE"):
-        lines.append(f"[사용법(보고 내용)] {clean(c.get('USAGE_DOSAGE'))}")
-    if c.get("REPORT_DATE"):
-        lines.append(f"[보고일] {c['REPORT_DATE']}")
-    if ingredients.strip():
-        lines.append(f"[전성분] {clean(ingredients)[:1500]}")
-    else:
-        lines.append("[전성분] 제공되지 않음 — 성분 설명은 하지 말고 ingredients는 빈 배열")
-    return "\n".join(lines)
-
-
-# ---------- Gemini ----------
-SYSTEM = """당신은 한국 약국에서 외국인 고객을 응대하는 약사를 돕는 도우미입니다.
-반드시 아래 JSON 하나만 반환하세요. JSON 외의 텍스트, 마크다운 펜스는 금지.
+NAVER_INGR_COMMON = """당신은 한국 약국에서 외국인 고객을 응대하는 약사를 돕는 도우미입니다.
+반드시 JSON 하나만 반환하세요. JSON 외의 텍스트, 마크다운 펜스는 금지.
 원문 첫 줄의 [제품군]을 반드시 확인하세요.
 - 의약품: 효능효과 원문의 동사(개선/완화/치료/예방)를 그대로 따르고, 원문이 "개선"이면 "치료"로 올리지 말 것.
 - 건강기능식품: 절대 "치료", "예방", "효과가 있다"라고 하지 말고, 식약처 인정 기능성 문구대로 "~에 도움을 줄 수 있어요"만 사용.
   "복용" 대신 "섭취", "약" 대신 "건강기능식품/영양제"라고 부를 것.
-- 기능성화장품: 식약처 보고 기능성(미백/주름개선/자외선차단 등)을 "~에 도움을 줘요"로만. 치료·질환 표현 금지.
-  how_to_take는 사용법(바르는 법·순서·양), cautions는 화장품 일반 주의(눈에 들어가지 않게, 이상 시 사용 중지, 자외선차단제는 덧바르기).
-  전성분이 주어졌을 때만 ingredients에 주요 성분 3~5개(미백·주름·보습·진정 등 핵심 역할 성분 위주)를 넣고, 역할 설명은 일반 화장품 성분 지식으로 보수적으로.
-  key_phrases (a)는 "미백에 도움을 줘요", "주름 개선에 도움을 줘요", "SPF 50이에요" 같은 것, (b)는 사용법(아침저녁, 마지막 단계에, 덧바르세요), (c)는 확인(민감성 피부세요?, 눈 주변 피하세요).
+- 기능성화장품: 식약처 보고 기능성(미백/주름개선/자외선차단 등)을 "~에 도움을 줘요"로만. 치료·질환 표현 금지. '복용' 금지, '바르다/사용하다'.
 원문에는 [허가사항] 전문과, 있을 경우 [쉬운설명]이 함께 옵니다. 내용은 허가사항이 기준이고, 쉬운설명은 표현 참고용.
-주의사항 전문은 매우 길 수 있으니 일반 고객에게 실제로 중요한 것(금기, 흔한 부작용, 병용 주의)만 추리세요.
+"""
 
-1. patient_guide: 고객에게 보여줄 안내. 대상 언어로, 짧은 문장, 쉬운 표현.
-   각 항목은 {"ko": 한국어, "tr": 대상 언어} 쌍. ko는 약사가 번역을 검토하기 위한 것이므로 tr과 내용이 정확히 일치해야 함.
-   - what_it_is: 2~3문장. 첫 문장은 효능(또는 기능성)을 쉬운 말로. 이어서 주성분이 어떻게 작용하는지 한 문장 (일반 약학 지식, 보수적으로).
-   - how_to_take, cautions, see_pharmacist_if: 원문에 있는 내용만 근거로. 없는 정보는 지어내지 마세요.
-   - ingredients: 주성분·원료 정보가 있을 때만. 성분별 배열 [{"name_ko":..., "name_tr":..., "amount":..., "role_ko":..., "role_tr":...}].
-     name은 고객이 알아들을 이름 (예: "빌베리건조엑스" → "빌베리 추출물(안토시아닌)"). role은 1~2문장, 과장 없이.
-     같은 계열이 여러 개면 묶어도 됨. 정보가 없으면 빈 배열. 반드시 객체 배열로.
+SYSTEM_GUIDE = COMMON + """
+patient_guide: 고객에게 보여줄 안내. 대상 언어로, 짧은 문장, 쉬운 표현.
+각 항목은 {"ko": 한국어, "tr": 대상 언어} 쌍. ko는 약사가 번역을 검토하기 위한 것이므로 tr과 내용이 정확히 일치해야 함.
+- what_it_is: 2~3문장. 첫 문장은 효능(또는 기능성)을 쉬운 말로. 이어서 주성분이 어떻게 작용하는지 한 문장 (일반 약학 지식, 보수적으로).
+- how_to_take: 용법·섭취방법·사용법. cautions: 일반 고객에게 실제로 중요한 것(금기, 흔한 부작용, 병용 주의)만.
+  see_pharmacist_if. 모두 원문에 있는 내용만 근거로. 없는 정보는 지어내지 마세요.
+- ingredients: 주성분·원료·전성분 정보가 있을 때만. [{"name_ko":..., "name_tr":..., "amount":..., "role_ko":..., "role_tr":...}].
+  name은 고객이 알아들을 이름. role은 1~2문장, 과장 없이. 화장품은 핵심 역할 성분 3~5개만. 정보가 없으면 빈 배열. 반드시 객체 배열로.
+형식: {"what_it_is": {"ko":"","tr":""}, "how_to_take": {"ko":"","tr":""}, "cautions": {"ko":"","tr":""},
+       "see_pharmacist_if": {"ko":"","tr":""}, "ingredients": []}"""
 
-2. key_phrases: 한국인 약사가 이 제품을 팔면서 직접 입으로 말하면 효과적인 단어·짧은 구 8~9개.
-   반드시 아래 세 묶음을 순서대로 포함:
-   (a) 효능 3~4개: 이 제품 고유의 것. "대상 + 동사" 짧은 문장 (의약품: "야맹증을 개선해요" / 건기식: "면역력에 도움을 줄 수 있어요").
-       성분 1개 포함 (예: "홍삼 성분이에요").
-   (b) 복용 2~3개: 실제 용법·섭취방법에서 (예: 하루 두세 번, 한 캡슐, 식후, 물에 타서).
-   (c) 확인 2개: 약사가 물어보거나 알려줄 것 (예: 당뇨약 드세요?, 2주 지나도 안 나으면 병원).
-   각 항목에 "group": "효능" | "복용" | "확인" 을 넣을 것.
-   각 항목: {"group":..., "ko": 한국어, "native": 대상 언어 표기, "roman": 로마자(성조 부호 포함, 라틴문자 언어는 원문 그대로),
-             "hangul": 한국인이 읽기 쉬운 한글 근사 발음, "tip": 성조/강세/발음 팁 한 줄}
-   광둥어는 native를 번체자 홍콩 구어체로, roman은 Jyutping(예: gam2 mou6 joek6)으로.
-   hangul은 한국어 음운으로 최대한 가깝게. tip은 한국어 화자가 틀리기 쉬운 지점을 구체적으로.
-
-형식:
-{"patient_guide": {"what_it_is": {"ko":"","tr":""}, "how_to_take": {"ko":"","tr":""}, "cautions": {"ko":"","tr":""},
-                   "see_pharmacist_if": {"ko":"","tr":""}, "ingredients": []},
- "key_phrases": []}"""
+SYSTEM_PHRASES = COMMON + """
+key_phrases: 한국인 약사가 이 제품을 팔면서 직접 입으로 말하면 효과적인 단어·짧은 구 8~9개.
+반드시 아래 세 묶음을 순서대로 포함:
+(a) 효능 3~4개: 이 제품 고유의 것. "대상 + 동사" 짧은 문장 (의약품: "야맹증을 개선해요" / 건기식: "면역력에 도움을 줄 수 있어요"
+    / 화장품: "미백에 도움을 줘요", "SPF 50이에요"). 성분 1개 포함 (예: "홍삼 성분이에요").
+(b) 복용 2~3개: 실제 용법·섭취방법·사용법에서 (예: 하루 두세 번, 한 캡슐, 식후, 아침저녁, 마지막 단계에).
+(c) 확인 2개: 약사가 물어보거나 알려줄 것 (예: 당뇨약 드세요?, 2주 지나도 안 나으면 병원, 민감성 피부세요?).
+각 항목에 "group": "효능" | "복용" | "확인".
+각 항목: {"group":..., "ko": 한국어, "native": 대상 언어 표기, "roman": 로마자(성조 부호 포함, 라틴문자 언어는 원문 그대로),
+          "hangul": 한국인이 읽기 쉬운 한글 근사 발음, "tip": 성조/강세/발음 팁 한 줄}
+광둥어는 native를 번체자 홍콩 구어체로, roman은 Jyutping(예: gam2 mou6 joek6)으로.
+hangul은 한국어 음운으로 최대한 가깝게. tip은 한국어 화자가 틀리기 쉬운 지점을 구체적으로.
+형식: {"key_phrases": []}"""
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def generate(source_text: str, language: str) -> dict:
-    tts_code, phon = LANGUAGES[language]
-    user = f"대상 언어: {language} (발음 특성: {phon})\n\n식약처 원문:\n{source_text}"
+def _gen_json(system: str, user: str) -> dict:
     last_err = None
     for attempt in range(3):
         try:
             resp = client.models.generate_content(
-                model=MODEL,
-                contents=user,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM,
-                    response_mime_type="application/json",
-                    thinking_config=types.ThinkingConfig(thinking_level="low"),
-                ),
+                model=MODEL, contents=user,
+                config=types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
+                                                   thinking_config=types.ThinkingConfig(thinking_level="low")),
             )
             if not resp.text:
                 raise RuntimeError(f"빈 응답: {resp.candidates[0].finish_reason if resp.candidates else resp}")
             raw = re.sub(r"^```(?:json)?|```$", "", resp.text.strip(), flags=re.M).strip()
-            raw = raw[raw.find("{"):]  # 앞의 잡글 제거
-            obj, _ = json.JSONDecoder().raw_decode(raw)  # 첫 JSON만 읽고 뒤는 무시
+            raw = raw[raw.find("{"):]
+            obj, _ = json.JSONDecoder().raw_decode(raw)
             return obj
         except Exception as e:
             last_err = e
@@ -514,6 +320,19 @@ def generate(source_text: str, language: str) -> dict:
                 continue
             raise
     raise last_err
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def generate(source_text: str, language: str) -> dict:
+    """안내문과 발음 카드를 두 요청으로 나눠 동시에 생성 (속도)"""
+    tts_code, phon = LANGUAGES[language]
+    user = f"대상 언어: {language} (발음 특성: {phon})\n\n식약처 원문:\n{source_text}"
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_guide = ex.submit(_gen_json, SYSTEM_GUIDE, user)
+        f_phr = ex.submit(_gen_json, SYSTEM_PHRASES, user)
+        guide = f_guide.result()
+        phr = f_phr.result()
+    return {"patient_guide": guide, "key_phrases": phr.get("key_phrases", [])}
 
 
 # ---------- 음성 ----------
