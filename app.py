@@ -30,6 +30,7 @@ PERMIT_URL = "https://apis.data.go.kr/1471000/DrugPrdtPrmsnInfoService07/getDrug
 EASY_DRUG_URL = "https://apis.data.go.kr/1471000/DrbEasyDrugInfoService/getDrbEasyDrugList"        # e약은요 (보조)
 HTFS_URL = "https://apis.data.go.kr/1471000/HtfsInfoService03/getHtfsItem01"                        # 건강기능식품
 COSM_URL = "https://apis.data.go.kr/1471000/FtnltCosmRptPrdlstInfoService01/getRptPrdlstInq01"        # 기능성화장품 보고품목
+DUR_BASE = "https://apis.data.go.kr/1471000/DURPrdlstInfoService03/"  # DUR 품목정보
 COSM_SRNG_URL = "https://apis.data.go.kr/1471057/FtnltCosmSrngPrdlstInfoService05/getSrngPrdlstInq05"  # 기능성화장품 심사품목
 
 # 언어명 → (BCP-47 TTS 코드, 성조/발음 특성 메모)
@@ -378,6 +379,154 @@ def render_reviews(name: str, kind_label: str):
                         st.markdown(f"- {x}")
             if R.get("caution"):
                 st.warning(R["caution"])
+
+
+# ---------- DUR 판매 전 확인 ----------
+DUR_OPS = {
+    "임부금기": "getPwnmTabooInfoList03",
+    "특정연령대금기": "getSpcifyAgrdeTabooInfoList03",
+    "노인주의": "getOdsnAtentInfoList03",
+    "용량주의": "getCpctyAtentInfoList03",
+    "투여기간주의": "getMdctnPdAtentInfoList03",
+    "병용금기": "getUsjntTabooInfoList03",
+    "효능군중복": "getEfcyDplctInfoList03",
+    "서방정분할주의": "getSeobangjeongPartitnAtentInfoList03",
+}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def dur_lookup(op: str, item_seq: str, rows: int = 50) -> list[dict]:
+    try:
+        items, _ = _get(DUR_BASE + op, {"itemSeq": item_seq, "numOfRows": rows})
+        return items
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def dur_all(item_seq: str) -> dict[str, list[dict]]:
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        futs = {k: ex.submit(dur_lookup, op, item_seq) for k, op in DUR_OPS.items()}
+        return {k: f.result() for k, f in futs.items()}
+
+
+def dur_text(it: dict) -> str:
+    return clean(it.get("PROHBT_CONTENT") or it.get("REMARK") or "")
+
+
+def ingr_names_of(permit: dict) -> list[str]:
+    names = []
+    for chunk in (permit.get("MATERIAL_NAME") or "").split(";"):
+        for part in chunk.split("|"):
+            if "성분명" in part and ":" in part:
+                names.append(part.split(":", 1)[1].strip())
+    return [n for n in names if n]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def resolve_other_drug(q: str) -> tuple[str, list[str]]:
+    """복용 중인 약 입력(제품명 또는 성분명) → (표시명, 성분명 목록)"""
+    q = q.strip()
+    if not q:
+        return "", []
+    try:
+        res = search_drug(q, rows=3)
+    except Exception:
+        res = []
+    if res:
+        p = res[0]["raw"]
+        return res[0]["name"], ingr_names_of(p) or [q]
+    return q, [q]
+
+
+def _norm(x: str) -> str:
+    return re.sub(r"[\s\(\)\[\]·,.\-]", "", x or "").lower()
+
+
+def interaction_hits(dur: dict, other_ingrs: list[str], other_name: str) -> list[tuple[str, dict]]:
+    """병용금기·효능군중복 목록에서 상대 약 성분/제품명이 걸리는 항목"""
+    keys = [_norm(x) for x in other_ingrs + [other_name] if x]
+    out = []
+    for cat in ("병용금기", "효능군중복"):
+        for it in dur.get(cat, []):
+            hay = _norm(" ".join(str(it.get(k) or "") for k in ("MIXTURE_INGR_KOR_NAME", "MIXTURE_ITEM_NAME", "MIXTURE_INGR_ENG_NAME")))
+            if any(k and (k in hay or hay and hay in k) for k in keys):
+                out.append((cat, it))
+    return out
+
+
+CHECK_Q_SYSTEM = """약국에서 약을 팔기 전에 외국인 고객에게 물어볼 확인 질문을 대상 언어로 만듭니다. 짧고 예의 바르게, 한 문장씩.
+JSON만 반환: {"pregnant": {"ko":"임신 중이거나 수유 중이세요?","tr":""},
+             "age": {"ko":"본인이 드실 건가요? 아이나 어르신이 드시나요?","tr":""},
+             "other": {"ko":"지금 드시는 약이 있으세요?","tr":""},
+             "allergy": {"ko":"약 알레르기가 있으세요?","tr":""}}"""
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def check_questions(language: str) -> dict:
+    try:
+        return _gen_json(CHECK_Q_SYSTEM, f"대상 언어: {language}")
+    except Exception:
+        return {}
+
+
+def render_dur(permit: dict, language: str):
+    seq = permit.get("ITEM_SEQ", "")
+    if not seq:
+        return
+    dur = dur_all(seq)
+    qs = check_questions(language)
+
+    st.subheader("🛡️ 판매 전 확인 (식약처 DUR)")
+    found = {k: v for k, v in dur.items() if v and k not in ("병용금기", "효능군중복")}
+    n_inter = len(dur.get("병용금기", [])) + len(dur.get("효능군중복", []))
+    if not found and not n_inter:
+        st.caption("이 품목은 DUR 등록 항목이 없습니다. (금기·주의 정보 없음)")
+    else:
+        st.caption("등록 항목: " + " · ".join([f"{k} {len(v)}" for k, v in found.items()] + ([f"병용금기/효능군중복 {n_inter}"] if n_inter else [])))
+
+    def q(key, default):
+        tr, ko = pair(qs.get(key)) if qs else ("", "")
+        return f"{tr or ''}  —  {ko or default}".strip(" —")
+
+    c1, c2 = st.columns(2)
+    preg = c1.checkbox(q("pregnant", "임신 중이거나 수유 중이세요?"), key=f"preg_{seq}")
+    age = c2.radio(q("age", "본인이 드실 건가요? 아이나 어르신이 드시나요?"), ["성인 본인", "어린이·청소년", "65세 이상"], horizontal=True, key=f"age_{seq}")
+    other = st.text_input(q("other", "지금 드시는 약이 있으세요?") + "  (제품명 또는 성분명, 쉼표로 여러 개)", key=f"other_{seq}",
+                          placeholder="예: 타이레놀, 아스피린, ibuprofen")
+
+    alerts = []
+    if preg and dur.get("임부금기"):
+        for it in dur["임부금기"][:3]:
+            alerts.append(("red", f"임부금기 {clean(it.get('GRADE') or '')}: {dur_text(it)}"))
+    if age == "어린이·청소년" and dur.get("특정연령대금기"):
+        for it in dur["특정연령대금기"][:3]:
+            alerts.append(("red", f"연령금기: {dur_text(it)}"))
+    if age == "65세 이상" and dur.get("노인주의"):
+        for it in dur["노인주의"][:3]:
+            alerts.append(("yellow", f"노인주의: {dur_text(it)}"))
+    for it in dur.get("용량주의", [])[:2]:
+        alerts.append(("yellow", f"용량주의: {dur_text(it)}"))
+    for it in dur.get("투여기간주의", [])[:2]:
+        alerts.append(("yellow", f"투여기간주의: {dur_text(it)}"))
+    for it in dur.get("서방정분할주의", [])[:1]:
+        alerts.append(("yellow", f"서방정 분할주의: {dur_text(it)}"))
+    if other.strip():
+        for one in [x for x in other.split(",") if x.strip()]:
+            name, ingrs = resolve_other_drug(one)
+            hits = interaction_hits(dur, ingrs, name)
+            if hits:
+                for cat, it in hits[:3]:
+                    alerts.append(("red" if cat == "병용금기" else "yellow",
+                                   f"{cat} — {name}: {clean(it.get('MIXTURE_INGR_KOR_NAME') or '')} {dur_text(it)}"))
+            else:
+                alerts.append(("green", f"{name}: DUR 병용금기·효능군중복 해당 없음 (성분: {', '.join(ingrs[:3])})"))
+
+    for level, msg in alerts:
+        (st.error if level == "red" else st.warning if level == "yellow" else st.success)(msg)
+    if not alerts:
+        st.info("체크한 조건에서 걸리는 DUR 항목이 없습니다.")
+    st.caption("DUR = 식약처 의약품안전사용서비스. 최종 판단은 약사가 합니다.")
 
 import os
 
@@ -905,5 +1054,7 @@ if query:
             st.subheader("🗣️ 약사가 직접 말하기")
             render_phrases(out.get("key_phrases"), language)
 
+        if chosen["kind"] == "의약품":
+            render_dur(raw, language)
         render_country(out.get("country_notes") or {}, language)
         render_reviews(chosen["name"], chosen["kind"])
