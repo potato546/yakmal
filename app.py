@@ -134,6 +134,101 @@ def search_cosm(q: str, rows: int = 8) -> list[dict]:
     return []
 
 
+def search_all(q: str) -> tuple[list[dict], dict]:
+    """의약품·건기식·기능성화장품 동시 검색. (결과, 소스별 오류) 반환"""
+    errors = {}
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futs = {"의약품": ex.submit(search_drug, q), "건강기능식품": ex.submit(search_htfs, q),
+                "기능성화장품": ex.submit(search_cosm, q)}
+    results = []
+    for kind, f in futs.items():
+        try:
+            results += f.result()
+        except Exception as e:
+            errors[kind] = str(e)
+    return results, errors
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def easy_by_seq(item_seq: str) -> dict | None:
+    try:
+        items = _get(EASY_DRUG_URL, {"itemSeq": item_seq, "numOfRows": 1})
+        return items[0] if items else None
+    except Exception:
+        return None
+
+
+def doc_text(xml: str | None) -> str:
+    if not xml:
+        return ""
+    t = re.sub(r"<!\[CDATA\[|\]\]>", "", xml)
+    t = re.sub(r"<[^>]+>", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def parse_material(material: str | None) -> list[str]:
+    out = []
+    for chunk in (material or "").split(";"):
+        kv = {}
+        for part in chunk.split("|"):
+            if ":" in part:
+                k, v = part.split(":", 1)
+                kv[k.strip()] = v.strip()
+        name = kv.get("성분명")
+        if name:
+            amt = f"{kv.get('분량', '')}{kv.get('단위', '')}".strip()
+            out.append(f"{name} {amt}".strip())
+    return out
+
+
+def strip_html(s: str | None) -> str:
+    return re.sub(r"<[^>]+>", "", s or "").strip()
+
+
+def clean(s: str | None) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()
+
+
+def build_drug_text(permit: dict, easy: dict | None) -> str:
+    lines = [
+        f"[제품군] 의약품 — {permit.get('ETC_OTC_CODE','')}",
+        f"[제품명] {permit.get('ITEM_NAME','')}",
+        f"[제조사] {permit.get('ENTP_NAME','')}",
+    ]
+    ingr = parse_material(permit.get("MATERIAL_NAME"))
+    if ingr:
+        lines.append("[주성분(허가정보)] " + ", ".join(ingr))
+    for label, key, limit in [("효능효과(허가사항)", "EE_DOC_DATA", 1500),
+                              ("용법용량(허가사항)", "UD_DOC_DATA", 1200),
+                              ("사용상 주의사항(허가사항)", "NB_DOC_DATA", 2500)]:
+        t = doc_text(permit.get(key))
+        if t:
+            lines.append(f"[{label}] {t[:limit]}")
+    if easy:
+        for label, key in [("효능(쉬운설명)", "efcyQesitm"), ("용법(쉬운설명)", "useMethodQesitm"),
+                           ("주의사항(쉬운설명)", "atpnQesitm"), ("상호작용(쉬운설명)", "intrcQesitm"),
+                           ("부작용(쉬운설명)", "seQesitm")]:
+            t = strip_html(easy.get(key))
+            if t:
+                lines.append(f"[{label}] {t}")
+    return "\n".join(lines)
+
+
+def build_htfs_text(h: dict) -> str:
+    lines = [
+        "[제품군] 건강기능식품 (의약품 아님 — 질병 치료·예방 표현 금지, 식약처 인정 기능성 문구 '~에 도움을 줄 수 있음'만 사용)",
+        f"[제품명] {clean(h.get('PRDUCT'))}",
+        f"[제조사] {clean(h.get('ENTRPS'))}",
+    ]
+    for label, key in [("기능성 내용(식약처 인정)", "MAIN_FNCTN"), ("섭취량·섭취방법", "SRV_USE"),
+                       ("섭취 시 주의사항", "INTAKE_HINT1"), ("성상", "SUNGSANG"),
+                       ("보관방법", "PRSRV_PD"), ("유통기한", "DISTB_PD"), ("기준규격", "BASE_STANDARD")]:
+        t = clean(h.get(key))
+        if t:
+            lines.append(f"[{label}] {t[:1200]}")
+    return "\n".join(lines)
+
+
 import os
 
 INGR_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cosmetic_ingredients.txt")
