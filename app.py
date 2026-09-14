@@ -18,7 +18,8 @@ from gtts import gTTS
 DATA_GO_KR_KEY = st.secrets.get("DATA_GO_KR_KEY", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-MODEL = "gemini-3.1-flash-lite"  # 무료 한도가 넉넉한 모델. 결제 연결 후엔 gemini-3.6-flash 로 바꿔도 됨
+MODEL = "gemini-3.1-flash-lite"  # 텍스트 생성용 (무료 한도 넉넉)
+MODEL_MEDIA = "gemini-3.6-flash"  # 음성·사진 이해용 (더 정확, 무료 하루 20회. 한도 넘으면 자동으로 위 모델로 전환)
 DATA_KEY = unquote(DATA_GO_KR_KEY)
 
 # 식약처 API (버전 번호가 바뀌면 이 줄들만 수정)
@@ -356,20 +357,37 @@ JSON만 반환 (마크다운 펜스 금지):
 광둥어는 native를 번체자 홍콩 구어체로, roman은 Jyutping으로. 음성이 한국어면 language를 '한국어'로 하고 reply_phrases는 빈 배열."""
 
 
-def listen_and_reply(audio_bytes: bytes, mime: str) -> dict:
-    resp = client.models.generate_content(
-        model=MODEL,
-        contents=[types.Part.from_bytes(data=audio_bytes, mime_type=mime), "이 음성을 듣고 JSON으로 정리."],
-        config=types.GenerateContentConfig(
-            system_instruction=LISTEN_SYSTEM,
-            response_mime_type="application/json",
-            thinking_config=types.ThinkingConfig(thinking_level="low"),
-        ),
-    )
-    raw = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.M).strip()
-    raw = raw[raw.find("{"):]
-    obj, _ = json.JSONDecoder().raw_decode(raw)
-    return obj
+def listen_and_reply(data: bytes, mime: str, hint_lang: str, is_image: bool = False) -> dict:
+    """고객 음성 또는 고객이 보여준 화면/사진 → 이해 + 답할 말. 좋은 모델 먼저, 한도 걸리면 Lite로."""
+    if is_image:
+        ask = (f"고객이 보여준 화면/사진입니다 (번역 앱 화면, 메모, 제품 사진, 자기 나라 약 사진 등). "
+               f"사진 속 글이나 제품이 무엇인지 파악해 transcript에는 보이는 글(또는 제품 설명)을, korean에는 한국어로 정리. "
+               f"고객 언어 힌트: {hint_lang}")
+    else:
+        ask = f"이 음성을 듣고 JSON으로 정리. 고객 언어 힌트: {hint_lang} (다른 언어면 실제 언어로)."
+    last = None
+    for m in (MODEL_MEDIA, MODEL):
+        try:
+            resp = client.models.generate_content(
+                model=m,
+                contents=[types.Part.from_bytes(data=data, mime_type=mime), ask],
+                config=types.GenerateContentConfig(
+                    system_instruction=LISTEN_SYSTEM,
+                    response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_level="low"),
+                ),
+            )
+            raw = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.M).strip()
+            raw = raw[raw.find("{"):]
+            obj, _ = json.JSONDecoder().raw_decode(raw)
+            obj["_model"] = m
+            return obj
+        except Exception as e:
+            last = e
+            if "429" in str(e) or "404" in str(e):
+                continue
+            raise
+    raise last
 
 
 # ---------- 화면 ----------
@@ -385,15 +403,29 @@ mode = col_m.radio("모드", ["제품 검색", "🎤 고객 말 듣기"], horizo
 language = col_l.selectbox("고객 언어", list(LANGUAGES))
 
 if mode == "🎤 고객 말 듣기":
-    st.caption("고객이 말하는 동안 녹음하고 멈추면, 무슨 말인지와 바로 답할 발음 카드가 나옵니다.")
-    rec = st.audio_input("녹음")
-    if rec is not None:
-        with st.spinner("듣는 중…"):
+    st.caption("고객이 말하면 녹음하거나, 고객이 보여주는 화면·사진을 찍으세요. 무슨 말인지와 바로 답할 발음 카드가 나옵니다. "
+               "오른쪽 위 '고객 언어'를 맞춰두면 인식이 더 정확해요.")
+    t_rec, t_img = st.tabs(["🎤 녹음", "📷 고객이 보여준 화면·사진"])
+    with t_rec:
+        rec = st.audio_input("녹음")
+    with t_img:
+        cam = st.camera_input("촬영")
+        up = st.file_uploader("사진 파일", type=["jpg", "jpeg", "png", "webp"], label_visibility="collapsed")
+    img = cam or up
+    src = None
+    if img is not None:
+        src = (img.getvalue(), img.type or "image/jpeg", True)
+    elif rec is not None:
+        src = (rec.getvalue(), rec.type or "audio/wav", False)
+    if src:
+        with st.spinner("이해하는 중…"):
             try:
-                L = listen_and_reply(rec.getvalue(), rec.type or "audio/wav")
+                L = listen_and_reply(src[0], src[1], language, is_image=src[2])
             except Exception as e:
                 st.error(f"인식 실패: {e}")
                 st.stop()
+        if L.get("_model") == MODEL:
+            st.caption("(정확도 높은 모델 한도 초과로 기본 모델로 처리했어요)")
         lang_detected = L.get("language", "기타")
         st.markdown(f"**감지 언어:** {lang_detected}")
         st.markdown(f"**고객 말:** {L.get('transcript','')}")
