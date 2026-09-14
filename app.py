@@ -555,25 +555,33 @@ def pair(v) -> tuple[str, str]:
     return str(v or ""), ""
 
 
+def esc(x) -> str:
+    return (str(x or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
 def render_phrases(phrases: list[dict], language: str):
     phrases = [p for p in (phrases or []) if isinstance(p, dict)]
     tts_code = LANGUAGES.get(language, ("en-US", ""))[0]
     gl = GTTS_LANG.get(language)
+    rtl = ' dir="rtl"' if language == "아랍어" else ""
     audios = make_all_audio([str(p.get("native", "")) for p in phrases], gl) if gl else [None] * len(phrases)
     last_group = None
     for p, audio in zip(phrases, audios):
         if p.get("group") and p.get("group") != last_group:
-            st.markdown(f"**▸ {p['group']}**")
+            st.markdown(f'<span class="ym-group">{esc(p["group"])}</span>', unsafe_allow_html=True)
             last_group = p["group"]
-        with st.container(border=True):
-            st.markdown(f"**{p.get('ko','')}**")
-            st.markdown(f"<span style='font-size:1.6em'>{p.get('native','')}</span>", unsafe_allow_html=True)
-            st.markdown(f"`{p.get('roman','')}` · **{p.get('hangul','')}**")
-            st.caption(f"💡 {p.get('tip','')}")
-            if audio:
-                st.audio(audio, format="audio/mp3")
-            else:
-                tts_button(str(p.get("native", "")), tts_code)
+        st.markdown(f"""
+<div class="ym-card">
+  <div class="ym-ko">{esc(p.get('ko'))}</div>
+  <div class="ym-native"{rtl}>{esc(p.get('native'))}</div>
+  <div class="ym-roman">{esc(p.get('roman'))}</div>
+  <div class="ym-hangul">{esc(p.get('hangul'))}</div>
+  <div class="ym-tip">💡 {esc(p.get('tip'))}</div>
+</div>""", unsafe_allow_html=True)
+        if audio:
+            st.audio(audio, format="audio/mp3")
+        else:
+            tts_button(str(p.get("native", "")), tts_code)
 
 
 # ---------- 듣기 모드 (고객 음성 → 이해 + 답할 말) ----------
@@ -628,8 +636,39 @@ def listen_and_reply(data: bytes, mime: str, hint_lang: str, is_image: bool = Fa
 
 
 # ---------- 화면 ----------
-st.set_page_config(page_title="약말", page_icon="💊", layout="wide")
-st.title("💊 약말 — 외국인 복약안내 + 약사 발음 도우미")
+st.set_page_config(page_title="약말 · 외국인 응대 발음 도우미", page_icon="💊", layout="wide",
+                   initial_sidebar_state="collapsed")
+
+st.markdown("""
+<style>
+#MainMenu, footer, header[data-testid="stHeader"] {visibility: hidden; height: 0;}
+.block-container {padding-top: 1.2rem; padding-bottom: 4rem; max-width: 1100px;}
+.ym-brand {display:flex; align-items:baseline; gap:.6rem; margin-bottom:.2rem;}
+.ym-brand h1 {font-size: 1.9rem; margin:0; letter-spacing:-.02em; color:#123b32;}
+.ym-brand span {color:#5c6b66; font-size:.95rem;}
+.ym-sub {color:#5c6b66; font-size:.9rem; margin: 0 0 1rem 0;}
+.ym-card {background:#fff; border:1px solid #dfe6e3; border-radius:16px; padding:14px 16px 12px; margin:0 0 10px 0;
+          box-shadow: 0 1px 2px rgba(18,59,50,.04);}
+.ym-ko {font-size:.85rem; color:#5c6b66; margin-bottom:2px;}
+.ym-native {font-size:1.75rem; line-height:1.25; font-weight:650; color:#123b32; word-break:break-word; margin:2px 0;}
+.ym-native[dir=rtl] {text-align:right;}
+.ym-roman {font-size:.95rem; color:#2f3d39; font-family: ui-monospace, Menlo, Consolas, monospace;}
+.ym-hangul {font-size:1.1rem; font-weight:700; color:#1f6e4e; margin-top:2px;}
+.ym-tip {font-size:.82rem; color:#5c6b66; margin-top:6px; padding-top:6px; border-top:1px dashed #e3e8e5;}
+.ym-group {display:inline-block; font-size:.78rem; font-weight:700; letter-spacing:.04em; color:#1f6e4e;
+           background:#e6f1eb; border-radius:999px; padding:3px 10px; margin:10px 0 6px 0;}
+.ym-guide {background:#fff; border:1px solid #dfe6e3; border-radius:16px; padding:6px 18px 10px;}
+.ym-guide h4 {font-size:.82rem; color:#5c6b66; font-weight:700; margin:12px 0 2px; letter-spacing:.02em;}
+.ym-guide p {font-size:1.05rem; line-height:1.55; margin:0 0 2px 0;}
+.ym-guide .ko {font-size:.85rem; color:#7a8683; margin:0 0 4px 0;}
+.ym-basis {font-size:.78rem; color:#7a8683; margin-top:10px;}
+.ym-tag {display:inline-block; font-size:.75rem; padding:2px 8px; border-radius:6px; margin-right:6px; font-weight:600;}
+.ym-tag.drug {background:#e8eef9; color:#1f3f8a;} .ym-tag.htfs {background:#eef7e6; color:#2f6b1f;} .ym-tag.cosm {background:#fbeef2; color:#8a1f4a;}
+div[data-testid="stAudio"] {margin-top:6px;}
+</style>
+<div class="ym-brand"><h1>💊 약말</h1><span>외국인 고객 응대 · 복약안내 + 약사 발음 도우미</span></div>
+<p class="ym-sub">식약처 공공데이터를 근거로 고객 언어 안내문을 만들고, 약사가 직접 말할 핵심 표현을 발음과 함께 제시합니다.</p>
+""", unsafe_allow_html=True)
 
 if not DATA_GO_KR_KEY or not GEMINI_API_KEY:
     st.warning("Secrets에 DATA_GO_KR_KEY, GEMINI_API_KEY를 넣어주세요.")
@@ -776,33 +815,29 @@ if query:
         left, right = st.columns(2)
 
         with left:
-            st.subheader(f"🧾 고객용 안내 ({language})")
+            st.subheader(f"🧾 고객용 안내 · {language}")
             if chosen["kind"] == "의약품" and easy and easy.get("itemImage"):
-                st.image(easy["itemImage"], width=220, caption="낱알 모양")
+                st.image(easy["itemImage"], width=200, caption="낱알 모양")
             g = out.get("patient_guide", {}) or {}
             head = "이 약은" if chosen["kind"] == "의약품" else "이 제품은"
             how = {"의약품": "복용법", "건강기능식품": "섭취방법"}.get(chosen["kind"], "사용법")
+            rtl = ' dir="rtl"' if language == "아랍어" else ""
+            html = ['<div class="ym-guide">']
             for label, k in [(head, "what_it_is"), (how, "how_to_take"), ("주의사항", "cautions"),
                              ("약사 상담이 필요한 경우", "see_pharmacist_if")]:
                 tr, ko = pair(g.get(k))
                 if not tr:
                     continue
-                st.markdown(f"**{label}**")
-                st.write(tr)
-                if ko:
-                    st.caption(ko)
-
-            ingr = g.get("ingredients") or []
+                html.append(f"<h4>{esc(label)}</h4><p{rtl}>{esc(tr)}</p>" + (f'<p class="ko">{esc(ko)}</p>' if ko else ""))
+            ingr = [i for i in (g.get("ingredients") or []) if isinstance(i, dict)]
             if ingr:
-                st.markdown("**주요 성분**")
+                html.append("<h4>주요 성분</h4>")
                 for i in ingr:
-                    if isinstance(i, dict):
-                        st.markdown(f"- **{i.get('name_tr','')}** {i.get('amount','')} — {i.get('role_tr','')}")
-                        st.caption(f"{i.get('name_ko','')} — {i.get('role_ko','')}")
-                    else:
-                        st.markdown(f"- {i}")
-                st.caption("성분·함량: 식약처 데이터 · 역할 설명: 일반 약학 정보(AI)")
-            st.caption(f"근거: {basis} · AI 생성 안내, 약사 확인 후 제공")
+                    html.append(f"<p{rtl}><b>{esc(i.get('name_tr'))}</b> {esc(i.get('amount'))} — {esc(i.get('role_tr'))}</p>"
+                                f"<p class=\"ko\">{esc(i.get('name_ko'))} — {esc(i.get('role_ko'))}</p>")
+                html.append('<div class="ym-basis">성분·함량: 식약처 데이터 · 역할 설명: 일반 약학 정보(AI)</div>')
+            html.append(f'<div class="ym-basis">근거: {esc(basis)} · AI 생성 안내, 약사 확인 후 제공</div></div>')
+            st.markdown("".join(html), unsafe_allow_html=True)
 
         with right:
             st.subheader("🗣️ 약사가 직접 말하기")
