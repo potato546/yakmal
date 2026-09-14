@@ -52,6 +52,17 @@ LANGUAGES = {
     "스페인어": ("es-ES", "r 굴림, 뒤에서 두 번째 음절 강세"),
 }
 
+# 언어 → 국가·지역 맥락 (반입 규제·종교·식이 안내용)
+COUNTRY = {
+    "영어": "영어권 관광객 (미국·영국·호주·캐나다·싱가포르·필리핀 등 — 국가를 확정할 수 없으니 주요국 공통 사항 위주)",
+    "중국어(보통화)": "중국 본토", "중국어(번체·대만)": "대만", "광둥어": "홍콩·마카오", "일본어": "일본",
+    "베트남어": "베트남", "태국어": "태국", "인도네시아어": "인도네시아 (무슬림 다수, 할랄 관심 높음)",
+    "아랍어": "중동 아랍권 (UAE·사우디·카타르 등, 무슬림 다수, 할랄·알코올 민감)", "터키어": "터키 (무슬림 다수)",
+    "몽골어": "몽골", "프랑스어": "프랑스·프랑스어권", "독일어": "독일·오스트리아·스위스", "이탈리아어": "이탈리아",
+    "러시아어": "러시아·CIS", "스페인어": "스페인·중남미",
+}
+FLAGS = ["할랄(무슬림)", "비건·채식", "알코올 금기", "글루텐 주의", "유당 불내증"]
+
 # gTTS(구글 음성) 언어 코드. 없는 언어(광둥어·몽골어)는 브라우저 음성으로 폴백
 GTTS_LANG = {
     "영어": "en", "중국어(보통화)": "zh-CN", "중국어(번체·대만)": "zh-TW", "일본어": "ja", "베트남어": "vi",
@@ -482,6 +493,19 @@ hangul은 한국어 음운으로 최대한 가깝게. tip은 한국어 화자가
 형식: {"key_phrases": []}"""
 
 
+SYSTEM_COUNTRY = COMMON + """
+country_notes: 이 제품을 외국인 관광객이 사서 본국으로 가져가거나 사용할 때 약사가 알려줄 국가·문화별 안전사항.
+근거 등급을 반드시 구분:
+- "확인": 식약처 원문(제형, 성분, 함량)에서 직접 확인되는 사실 (예: 연질캡슐 → 젤라틴 캡슐, 액제에 에탄올 함유)
+- "참고": 일반 지식 (반입 규제, 본국 등가 제품, 종교·식이 관행). 규제는 바뀌므로 "출국 전 세관·대사관 확인" 전제.
+과장·단정 금지. 해당 없으면 level을 "해당없음"으로. 각 text는 {"ko": 한국어, "tr": 대상 언어} 쌍 (약사가 대조·전달).
+형식:
+{"import": {"level": "주의"|"참고"|"해당없음", "basis": "확인"|"참고", "text": {"ko":"","tr":""}},   # 본국 반입 규제 (예: 일본 슈도에페드린·코데인 한도, 태국·UAE 향정 규제)
+ "religion_diet": {"level": ..., "basis": ..., "text": {"ko":"","tr":""}},                          # 할랄(젤라틴·에탄올·돼지 유래), 비건, 알코올, 글루텐, 유당 등. 고객 특이사항이 있으면 그것 중심
+ "equivalent": {"level": ..., "basis": "참고", "text": {"ko":"","tr":""}},                          # 본국에서 같은 성분의 흔한 제품·일반명 (예: 아세트아미노펜 → 일본 カロナール, 미국 Tylenol). 화장품·건기식은 성분 일반명 위주
+ "pharmacist_checks": ["약사가 제조사에 확인하거나 고객에게 물어볼 것 (예: 캡슐 젤라틴 기원(소/돼지) 제조사 확인)"]}"""
+
+
 def _gen_json(system: str, user: str) -> dict:
     last_err = None
     for attempt in range(3):
@@ -507,16 +531,23 @@ def _gen_json(system: str, user: str) -> dict:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def generate(source_text: str, language: str) -> dict:
-    """안내문과 발음 카드를 두 요청으로 나눠 동시에 생성 (속도)"""
+def generate(source_text: str, language: str, flags: tuple[str, ...] = ()) -> dict:
+    """안내문 / 발음 카드 / 국가별 안전사항을 세 요청으로 나눠 동시에 생성"""
     tts_code, phon = LANGUAGES[language]
     user = f"대상 언어: {language} (발음 특성: {phon})\n\n식약처 원문:\n{source_text}"
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    user_c = (f"대상 언어: {language}\n고객 국가·지역: {COUNTRY.get(language, language)}\n"
+              f"고객 특이사항: {', '.join(flags) if flags else '없음'}\n\n식약처 원문:\n{source_text}")
+    with ThreadPoolExecutor(max_workers=3) as ex:
         f_guide = ex.submit(_gen_json, SYSTEM_GUIDE, user)
         f_phr = ex.submit(_gen_json, SYSTEM_PHRASES, user)
+        f_cty = ex.submit(_gen_json, SYSTEM_COUNTRY, user_c)
         guide = f_guide.result()
         phr = f_phr.result()
-    return {"patient_guide": guide, "key_phrases": phr.get("key_phrases", [])}
+        try:
+            cty = f_cty.result()
+        except Exception as e:
+            cty = {"_error": str(e)[:200]}
+    return {"patient_guide": guide, "key_phrases": phr.get("key_phrases", []), "country_notes": cty}
 
 
 # ---------- 음성 ----------
@@ -635,6 +666,36 @@ def listen_and_reply(data: bytes, mime: str, hint_lang: str, is_image: bool = Fa
     raise last
 
 
+def render_country(c: dict, language: str):
+    st.subheader(f"🌍 국가별 안전사항 · {COUNTRY.get(language, language).split(' (')[0]}")
+    if c.get("_error"):
+        st.caption(f"생성 실패: {c['_error']}")
+        return
+    rtl = ' dir="rtl"' if language == "아랍어" else ""
+    icon = {"주의": "⚠️", "참고": "ℹ️", "해당없음": "✅"}
+    rows = [("본국 반입", "import"), ("종교·식이", "religion_diet"), ("본국 등가 제품", "equivalent")]
+    html = ['<div class="ym-guide">']
+    shown = 0
+    for label, k in rows:
+        item = c.get(k) or {}
+        if not isinstance(item, dict) or item.get("level") == "해당없음":
+            continue
+        tr, ko = pair(item.get("text"))
+        if not (tr or ko):
+            continue
+        shown += 1
+        badge = f'<span class="ym-tag {"drug" if item.get("basis")=="확인" else "htfs"}">{esc(item.get("basis","참고"))}</span>'
+        html.append(f"<h4>{icon.get(item.get('level'),'')} {esc(label)} {badge}</h4><p{rtl}>{esc(tr)}</p>"
+                    + (f'<p class="ko">{esc(ko)}</p>' if ko else ""))
+    checks = [x for x in (c.get("pharmacist_checks") or []) if isinstance(x, str)]
+    if checks:
+        html.append("<h4>약사 확인 사항</h4>" + "".join(f"<p>• {esc(x)}</p>" for x in checks))
+    if shown == 0 and not checks:
+        html.append("<p>이 제품·국가 조합에서 특별히 알려줄 사항이 없습니다.</p>")
+    html.append('<div class="ym-basis">「확인」= 식약처 원문 근거 · 「참고」= 일반 지식(반입 규제는 출국 전 세관·대사관 확인)</div></div>')
+    st.markdown("".join(html), unsafe_allow_html=True)
+
+
 # ---------- 화면 ----------
 st.set_page_config(page_title="약말 · 외국인 응대 발음 도우미", page_icon="💊", layout="wide",
                    initial_sidebar_state="collapsed")
@@ -677,6 +738,7 @@ if not DATA_GO_KR_KEY or not GEMINI_API_KEY:
 col_m, col_l = st.columns([3, 1])
 mode = col_m.radio("모드", ["제품 검색", "🎤 고객 말 듣기"], horizontal=True, label_visibility="collapsed")
 language = col_l.selectbox("고객 언어", list(LANGUAGES))
+flags = tuple(st.multiselect("고객 특이사항 (선택)", FLAGS, placeholder="할랄, 비건 등 해당되면 선택"))
 
 if mode == "🎤 고객 말 듣기":
     st.caption("고객이 말하면 녹음하거나, 고객이 보여주는 화면·사진을 찍으세요. 무슨 말인지와 바로 답할 발음 카드가 나옵니다. "
@@ -806,7 +868,7 @@ if query:
 
         with st.spinner(f"{language} 안내 + 발음 카드 생성 중…"):
             try:
-                out = generate(source_text, language)
+                out = generate(source_text, language, flags)
             except Exception as e:
                 st.error(f"생성 실패: {e}")
                 st.stop()
@@ -843,4 +905,5 @@ if query:
             st.subheader("🗣️ 약사가 직접 말하기")
             render_phrases(out.get("key_phrases"), language)
 
+        render_country(out.get("country_notes") or {}, language)
         render_reviews(chosen["name"], chosen["kind"])
