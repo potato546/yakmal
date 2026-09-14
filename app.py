@@ -17,6 +17,10 @@ from gtts import gTTS
 #  - Streamlit Cloud: 앱 설정 > Secrets 에 입력
 DATA_GO_KR_KEY = st.secrets.get("DATA_GO_KR_KEY", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+# 네이버 API HUB 키 — Secrets에 없으면 아래 값을 씀 (깃허브 저장소는 Private로 두세요)
+NAVER_CLIENT_ID = st.secrets.get("NAVER_CLIENT_ID", "mtibss12ru")
+NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "0Fh90fU9r3Q4LWX9XcrpTkc1zobJeJn3p0f0G6Hy")
+NAVER_BASE = "https://naverapihub.apigw.ntruss.com/search/v1"  # NAVER API HUB (네이버클라우드)
 
 MODEL = "gemini-3.1-flash-lite"  # 텍스트 생성용 (무료 한도 넉넉)
 MODEL_MEDIA = "gemini-3.6-flash"  # 음성·사진 이해용 (더 정확, 무료 하루 20회. 한도 넘으면 자동으로 위 모델로 전환)
@@ -228,6 +232,142 @@ def build_htfs_text(h: dict) -> str:
             lines.append(f"[{label}] {t[:1200]}")
     return "\n".join(lines)
 
+
+
+# ---------- 네이버 검색 (전성분·제형·후기) ----------
+def naver_ok() -> bool:
+    return bool(NAVER_CLIENT_ID and NAVER_CLIENT_SECRET)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def naver_search(kind: str, query: str, display: int = 20) -> list[dict]:
+    """kind: blog | webkr | cafearticle | news"""
+    r = requests.get(f"{NAVER_BASE}/{kind}", params={"query": query, "display": display, "format": "json"},
+                     headers={"X-NCP-APIGW-API-KEY-ID": NAVER_CLIENT_ID, "X-NCP-APIGW-API-KEY": NAVER_CLIENT_SECRET}, timeout=12)
+    r.raise_for_status()
+    return r.json().get("items") or []
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def fetch_text(url: str, limit: int = 6000) -> str:
+    """페이지 본문 텍스트 (네이버 블로그는 모바일 주소로)"""
+    try:
+        u = url.replace("https://blog.naver.com/", "https://m.blog.naver.com/")
+        r = requests.get(u, timeout=10, headers={"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"})
+        html = r.text
+        html = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", html, flags=re.S | re.I)
+        text = re.sub(r"<[^>]+>", " ", html)
+        text = re.sub(r"&nbsp;|&amp;|&lt;|&gt;|&quot;", " ", text)
+        return re.sub(r"\s+", " ", text).strip()[:limit]
+    except Exception:
+        return ""
+
+
+NAVER_INGR_SYSTEM = """네이버 검색 결과와 페이지 본문에서 특정 화장품의 정보를 뽑습니다.
+반드시 해당 제품(제품명이 일치)의 것만 사용. 다른 제품 것은 섞지 말 것.
+JSON만 반환 (마크다운 펜스 금지):
+{"found": true/false, "partial": true/false,
+ "ingredients": "전성분(또는 확인된 주요 성분)을 표시 순서대로 쉼표로 이어 쓴 문자열",
+ "disclosed_amounts": "회사가 공개한 함량 (예: PDRN 2%), 없으면 빈 문자열",
+ "texture": "제형·사용감 (예: 젤 크림, 가벼움, 끈적임 없음) 한 줄. 광고 표현 제외",
+ "source": "출처 페이지 제목 또는 URL", "note": "확인 범위·주의 한 줄"}"""
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def naver_ingredients(name: str, maker: str) -> dict:
+    hits = []
+    for q in (f"{name} 전성분", f"{name} 성분"):
+        for kind in ("webkr", "blog"):
+            try:
+                hits += naver_search(kind, q, display=10)
+            except Exception:
+                pass
+    seen, pages = set(), []
+    for h in hits:
+        link = h.get("link", "")
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        body = fetch_text(link, 5000)
+        if "전성분" in body or "성분" in body:
+            pages.append(f"### {clean(strip_html(h.get('title','')))} ({link})\n{body}")
+        if len(pages) >= 5:
+            break
+    if not pages:
+        return {"found": False, "note": "검색 결과에서 성분 텍스트를 찾지 못함"}
+    ctx = f"제품명: {name} / 판매사: {maker}\n\n" + "\n\n".join(pages)
+    resp = client.models.generate_content(
+        model=MODEL, contents=ctx[:30000],
+        config=types.GenerateContentConfig(system_instruction=NAVER_INGR_SYSTEM, response_mime_type="application/json",
+                                           thinking_config=types.ThinkingConfig(thinking_level="low")),
+    )
+    raw = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.M).strip()
+    raw = raw[raw.find("{"):]
+    obj, _ = json.JSONDecoder().raw_decode(raw)
+    return obj
+
+
+REVIEW_SYSTEM = """약사가 참고할 실사용 후기 요약을 만듭니다. 입력은 네이버 블로그·카페 글 목록(제목·요약)입니다.
+협찬·광고·판매 목적 글("협찬", "제공받아", "광고", "공동구매", 지나친 찬사, 구매 링크 유도)은 제외하고 개인 경험담만 사용.
+고객에게 보여주는 글이 아니라 약사 내부 참고용. 효능 근거로 쓰지 말 것을 전제로, 담백하게.
+JSON만 반환 (마크다운 펜스 금지):
+{"used": 사용한 글 수, "excluded_ads": 제외한 협찬 의심 글 수,
+ "effects": ["체감 효과로 자주 언급된 것 (몇 건인지 괄호로)", ...],
+ "side_effects": ["부작용·불편으로 언급된 것 (건수)", ...],
+ "tips": ["복용·사용 팁, 사용감, 제형 등", ...],
+ "caution": "약사가 주의해서 볼 점 한 줄 (예: 졸림 언급이 많음)"}"""
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def naver_reviews(name: str, kind_label: str) -> dict:
+    hits = []
+    for q in (f"{name} 후기", f"{name} 부작용" if kind_label != "기능성화장품" else f"{name} 사용감"):
+        for k in ("blog", "cafearticle"):
+            try:
+                hits += naver_search(k, q, display=20)
+            except Exception:
+                pass
+    seen, lines = set(), []
+    for h in hits:
+        link = h.get("link", "")
+        if link in seen:
+            continue
+        seen.add(link)
+        lines.append(f"- [{clean(strip_html(h.get('title','')))}] {clean(strip_html(h.get('description','')))} ({h.get('postdate') or h.get('pubDate','')})")
+    if not lines:
+        return {"used": 0, "excluded_ads": 0, "effects": [], "side_effects": [], "tips": [], "caution": "후기를 찾지 못함"}
+    ctx = f"제품: {name} ({kind_label})\n\n" + "\n".join(lines[:60])
+    resp = client.models.generate_content(
+        model=MODEL, contents=ctx,
+        config=types.GenerateContentConfig(system_instruction=REVIEW_SYSTEM, response_mime_type="application/json",
+                                           thinking_config=types.ThinkingConfig(thinking_level="low")),
+    )
+    raw = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.M).strip()
+    raw = raw[raw.find("{"):]
+    obj, _ = json.JSONDecoder().raw_decode(raw)
+    return obj
+
+
+def render_reviews(name: str, kind_label: str):
+    if not naver_ok():
+        return
+    with st.expander("📝 약사 참고: 실사용 후기 요약 (네이버 블로그·카페) — 고객 안내에는 사용되지 않음"):
+        if st.button("후기 모아 보기", key=f"rv_{name}"):
+            with st.spinner("후기 수집·정리 중…"):
+                try:
+                    R = naver_reviews(name, kind_label)
+                except Exception as e:
+                    st.error(f"후기 조회 실패: {str(e)[:200]}")
+                    return
+            st.caption(f"개인 경험담 {R.get('used',0)}건 요약 · 협찬 의심 {R.get('excluded_ads',0)}건 제외 · 효능·안전성 근거 아님")
+            for label, k in [("체감 효과", "effects"), ("부작용·불편", "side_effects"), ("팁·사용감", "tips")]:
+                items = [x for x in (R.get(k) or []) if isinstance(x, str)]
+                if items:
+                    st.markdown(f"**{label}**")
+                    for x in items:
+                        st.markdown(f"- {x}")
+            if R.get("caution"):
+                st.warning(R["caution"])
 
 import os
 
@@ -572,10 +712,34 @@ if query:
                 src_label = " + 등록 파일 전성분"
                 st.success("등록된 전성분을 사용합니다 (cosmetic_ingredients.txt)")
             else:
+                if naver_ok() and st.button("🔎 네이버에서 전성분·제형 찾기", key=f"nv_{chosen['name']}"):
+                    st.session_state["nv_for"] = chosen["name"]
+                if naver_ok() and st.session_state.get("nv_for") == chosen["name"]:
+                    with st.spinner("네이버 검색 + 페이지 읽는 중…"):
+                        try:
+                            w = naver_ingredients(chosen["name"], chosen["maker"])
+                        except Exception as e:
+                            w = {"found": False, "note": str(e)[:200]}
+                    if w.get("found") and w.get("ingredients"):
+                        ingr_text = w["ingredients"]
+                        if w.get("disclosed_amounts"):
+                            ingr_text += f"\n[회사 공개 함량] {w['disclosed_amounts']}"
+                        if w.get("texture"):
+                            ingr_text += f"\n[제형·사용감(웹)] {w['texture']}"
+                        tag = "주요 성분 일부" if w.get("partial") else "전성분"
+                        src_label = f" + {tag}(웹: {w.get('source','')}) — 포장과 대조 필요"
+                        st.warning(f"웹에서 찾은 {tag} — 포장과 대조해 확인하세요. 출처: {w.get('source','')}\n\n"
+                                   f"{w['ingredients'][:400]}{'…' if len(w['ingredients'])>400 else ''}"
+                                   + (f"\n\n제형·사용감: {w['texture']}" if w.get('texture') else "")
+                                   + (f"\n\n{w['note']}" if w.get('note') else ""))
+                        st.code(f"{chosen['name']} | {w['ingredients']}", language=None)
+                        st.caption("↑ 확인 후 이 줄을 cosmetic_ingredients.txt에 넣어두면 다음부턴 자동")
+                    else:
+                        st.caption(f"네이버에서 성분을 찾지 못했어요. {w.get('note','')} 사진이나 붙여넣기로 넣어주세요.")
                 upload = st.file_uploader("전성분 사진 파일 선택", type=["jpg", "jpeg", "png", "webp"])
                 photo = st.camera_input("포장의 전성분 부분을 촬영") if st.toggle("📷 카메라 켜기", key="cam_cosm") else None
                 img = photo or upload
-                if img is not None:
+                if img is not None and not ingr_text:
                     with st.spinner("사진에서 전성분 읽는 중…"):
                         try:
                             r = read_ingredients_from_photo(img.getvalue(), img.type or "image/jpeg")
@@ -641,3 +805,5 @@ if query:
         with right:
             st.subheader("🗣️ 약사가 직접 말하기")
             render_phrases(out.get("key_phrases"), language)
+
+        render_reviews(chosen["name"], chosen["kind"])
