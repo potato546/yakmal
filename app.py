@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,8 @@ from gtts import gTTS
 #  - Streamlit Cloud: 앱 설정 > Secrets 에 입력
 DATA_GO_KR_KEY = st.secrets.get("DATA_GO_KR_KEY", "")
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY", "")
+GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", "")          # 선택: 우리 약국 목록을 앱에서 바로 깃허브에 저장
+GITHUB_REPO = st.secrets.get("GITHUB_REPO", "")            # 예: potato546/yakmal
 NAVER_CLIENT_ID = st.secrets.get("NAVER_CLIENT_ID", "")
 NAVER_CLIENT_SECRET = st.secrets.get("NAVER_CLIENT_SECRET", "")
 NAVER_BASE = "https://naverapihub.apigw.ntruss.com/search/v1"  # NAVER API HUB (네이버클라우드)
@@ -528,6 +531,143 @@ def render_dur(permit: dict, language: str):
         st.info("체크한 조건에서 걸리는 DUR 항목이 없습니다.")
     st.caption("DUR = 식약처 의약품안전사용서비스. 최종 판단은 약사가 합니다.")
 
+
+# ---------- 우리 약국 목록 (등록·저장) ----------
+import base64
+
+MY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "my_pharmacy.txt")
+
+
+def parse_my_lines(text: str) -> list[dict]:
+    """'제품군 | 제품명 | 제조사' 또는 '제품명' 한 줄씩"""
+    out = []
+    for line in text.splitlines():
+        t = line.strip()
+        if not t or t.startswith("#"):
+            continue
+        parts = [x.strip() for x in t.split("|")]
+        if len(parts) >= 3:
+            out.append({"kind": parts[0], "name": parts[1], "maker": parts[2]})
+        elif len(parts) == 2:
+            out.append({"kind": parts[0], "name": parts[1], "maker": ""})
+        else:
+            out.append({"kind": "", "name": parts[0], "maker": ""})
+    return out
+
+
+def my_lines_text(items: list[dict]) -> str:
+    head = "# 우리 약국 제품 목록 — 앱에서 ⭐로 추가/삭제하고 저장하세요. 형식: 제품군 | 제품명 | 제조사\n"
+    return head + "\n".join((i['name'] if i['kind'] in ('', '?') else f"{i['kind']} | {i['name']} | {i['maker']}") for i in items) + "\n"
+
+
+def load_my_from_file() -> list[dict]:
+    if not os.path.exists(MY_FILE):
+        return []
+    with open(MY_FILE, encoding="utf-8") as f:
+        return parse_my_lines(f.read())
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def resolve_my_name(name: str) -> dict | None:
+    """제품명만 적힌 줄을 식약처 검색으로 확정 (이름이 정확히 같은 것 우선)"""
+    try:
+        results, _ = search_all(name)
+    except Exception:
+        return None
+    if not results:
+        return None
+    key = name.replace(" ", "")
+    for r in results:
+        if r["name"].replace(" ", "") == key:
+            return {"kind": r["kind"], "name": r["name"], "maker": r["maker"]}
+    r = results[0]
+    return {"kind": r["kind"], "name": r["name"], "maker": r["maker"]}
+
+
+def resolve_my_items(items: list[dict]) -> list[dict]:
+    """kind가 비어 있는 항목만 병렬로 확정. 못 찾으면 kind='?'로 남김"""
+    todo = [i for i, x in enumerate(items) if not x.get("kind")]
+    if not todo:
+        return items
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        found = list(ex.map(lambda i: resolve_my_name(items[i]["name"]), todo))
+    out = list(items)
+    for i, r in zip(todo, found):
+        out[i] = r if r else {"kind": "?", "name": items[i]["name"], "maker": ""}
+    return out
+
+
+def my_key(r: dict) -> tuple:
+    return (r.get("kind", ""), r.get("name", "").replace(" ", ""))
+
+
+def my_add(r: dict):
+    items = st.session_state["my_products"]
+    if my_key(r) not in {my_key(x) for x in items}:
+        items.append({"kind": r["kind"], "name": r["name"], "maker": r.get("maker", "")})
+        st.session_state["my_dirty"] = True
+
+
+def my_remove(key: tuple):
+    st.session_state["my_products"] = [x for x in st.session_state["my_products"] if my_key(x) != key]
+    st.session_state["my_dirty"] = True
+
+
+def github_save(text: str) -> str:
+    """my_pharmacy.txt를 깃허브에 커밋. 성공 시 빈 문자열, 실패 시 오류 메시지."""
+    if not (GITHUB_TOKEN and GITHUB_REPO):
+        return "GITHUB_TOKEN / GITHUB_REPO 가 Secrets에 없음"
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/my_pharmacy.txt"
+    h = {"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json"}
+    try:
+        cur = requests.get(url, headers=h, timeout=10)
+        sha = cur.json().get("sha") if cur.status_code == 200 else None
+        body = {"message": "우리 약국 목록 갱신 (앱)", "content": base64.b64encode(text.encode("utf-8")).decode()}
+        if sha:
+            body["sha"] = sha
+        r = requests.put(url, headers=h, json=body, timeout=15)
+        return "" if r.status_code in (200, 201) else f"{r.status_code} {r.text[:120]}"
+    except Exception as e:
+        return str(e)[:150]
+
+
+def render_my_sidebar():
+    with st.sidebar:
+        st.markdown("### 🏪 우리 약국 목록")
+        items = st.session_state["my_products"]
+        if not items:
+            st.caption("검색 결과에서 ⭐ 버튼으로 추가하세요.")
+        for x in items:
+            c1, c2 = st.columns([5, 1])
+            cls = 'drug' if x['kind'] == '의약품' else 'htfs' if x['kind'] == '건강기능식품' else 'cosm'
+            if x['kind'] == '?':
+                c1.markdown(f"❓ {esc(x['name'])} <span class='ym-basis'>(식약처에서 못 찾음 — 이름 수정)</span>", unsafe_allow_html=True)
+            else:
+                c1.markdown(f"<span class='ym-tag {cls}'>{esc(x['kind'][:3])}</span> {esc(x['name'])}", unsafe_allow_html=True)
+            if c2.button("✕", key=f"rm_{my_key(x)}"):
+                my_remove(my_key(x))
+                st.rerun()
+        st.divider()
+        txt = my_lines_text(items)
+        if st.session_state.get("my_dirty"):
+            st.caption("변경됨 — 저장하지 않으면 앱 재시작 시 사라져요.")
+        if GITHUB_TOKEN and GITHUB_REPO:
+            if st.button("💾 깃허브에 저장", use_container_width=True):
+                err = github_save(txt)
+                if err:
+                    st.error(f"저장 실패: {err}")
+                else:
+                    st.session_state["my_dirty"] = False
+                    st.success("저장됨. 1분 뒤 앱이 새 목록으로 재시작해요.")
+        st.download_button("⬇️ my_pharmacy.txt 내려받기", txt, file_name="my_pharmacy.txt", use_container_width=True)
+        up = st.file_uploader("목록 파일 불러오기", type=["txt"], label_visibility="collapsed")
+        if up is not None:
+            st.session_state["my_products"] = resolve_my_items(parse_my_lines(up.getvalue().decode("utf-8", "ignore")))
+            st.session_state["my_dirty"] = True
+            st.rerun()
+        if not (GITHUB_TOKEN and GITHUB_REPO):
+            st.caption("영구 저장: 내려받은 파일을 깃허브의 my_pharmacy.txt에 붙여넣기. (Secrets에 GITHUB_TOKEN·GITHUB_REPO를 넣으면 버튼 한 번으로 저장돼요)")
+
 import os
 
 INGR_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cosmetic_ingredients.txt")
@@ -605,6 +745,64 @@ def build_cosm_text(c: dict, ingredients: str = "") -> str:
     return "\n".join(lines)
 
 
+def build_general_cosm_text(name: str, maker: str, ingredients: str, claims: str) -> str:
+    lines = [
+        "[제품군] 일반화장품 (식약처 기능성 인증 없음 — 효능 단정 금지. 제조사 자체 시험 결과는 출처를 밝혀서만 전달. 광고 형용사 배제)",
+        f"[제품명] {clean(name)}",
+        f"[제조사] {clean(maker)}",
+    ]
+    if ingredients.strip():
+        lines.append(f"[전성분] {clean(ingredients)[:1500]}")
+    else:
+        lines.append("[전성분] 제공되지 않음 — 성분 설명은 하지 말고 ingredients는 빈 배열")
+    if claims.strip():
+        lines.append(f"[제조사 자체 시험·표시 내용(웹 출처)] {clean(claims)[:1000]}")
+    return "\n".join(lines)
+
+
+NAVER_CLAIMS_SYSTEM = """네이버 검색 결과와 페이지 본문에서 화장품의 '제조사 자체 시험 결과'만 뽑습니다.
+조건: 구체적 수치 + 시험 방법·기간 + (가능하면) 시험 기관명이 함께 있는 것만. "즉각 개선", "최고" 같은 형용사만 있는 문장은 버림.
+반드시 해당 제품 것만 사용, 다른 제품 것 섞지 말 것.
+JSON만 반환 (마크다운 펜스 금지):
+{"found": true/false, "claims": "구체적 시험 결과 요약 한두 문장 (예: 12주 사용 후 피부 요철 개선율 87%, OO피부과 임상 평가)",
+ "ingredients": "전성분을 찾았으면 표시 순서대로, 없으면 빈 문자열",
+ "source": "출처 페이지 제목 또는 URL", "note": "확인 범위·주의 한 줄"}"""
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def naver_claims(name: str, maker: str) -> dict:
+    hits = []
+    for q in (f"{name} 임상", f"{name} 시험 결과", f"{name} 전성분"):
+        for kind in ("webkr", "blog"):
+            try:
+                hits += naver_search(kind, q, display=10)
+            except Exception:
+                pass
+    seen, pages = set(), []
+    for h in hits:
+        link = h.get("link", "")
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        body = fetch_text(link, 5000)
+        if body:
+            pages.append(f"### {clean(strip_html(h.get('title','')))} ({link})\n{body}")
+        if len(pages) >= 5:
+            break
+    if not pages:
+        return {"found": False, "note": "검색 결과 없음"}
+    ctx = f"제품명: {name} / 제조사: {maker}\n\n" + "\n\n".join(pages)
+    resp = client.models.generate_content(
+        model=MODEL, contents=ctx[:30000],
+        config=types.GenerateContentConfig(system_instruction=NAVER_CLAIMS_SYSTEM, response_mime_type="application/json",
+                                           thinking_config=types.ThinkingConfig(thinking_level="low")),
+    )
+    raw = re.sub(r"^```(?:json)?|```$", "", (resp.text or "").strip(), flags=re.M).strip()
+    raw = raw[raw.find("{"):]
+    obj, _ = json.JSONDecoder().raw_decode(raw)
+    return obj
+
+
 # ---------- Gemini (안내문 + 발음 카드) ----------
 COMMON = """당신은 한국 약국에서 외국인 고객을 응대하는 약사를 돕는 도우미입니다.
 반드시 JSON 하나만 반환하세요. JSON 외의 텍스트, 마크다운 펜스는 금지.
@@ -613,6 +811,8 @@ COMMON = """당신은 한국 약국에서 외국인 고객을 응대하는 약�
 - 건강기능식품: 절대 "치료", "예방", "효과가 있다"라고 하지 말고, 식약처 인정 기능성 문구대로 "~에 도움을 줄 수 있어요"만 사용.
   "복용" 대신 "섭취", "약" 대신 "건강기능식품/영양제"라고 부를 것.
 - 기능성화장품: 식약처 보고 기능성(미백/주름개선/자외선차단 등)을 "~에 도움을 줘요"로만. 치료·질환 표현 금지. '복용' 금지, '바르다/사용하다'.
+- 일반화장품(식약처 미등록): 식약처 인증 문구가 없으므로 효능을 단정하지 말 것. 제조사 자체 시험 결과가 구체적 수치·기관명과 함께 주어졌으면
+  "제조사 자체 시험에서는 ~로 나타났어요"처럼 출처를 밝혀 전달. 광고 형용사("최고의","즉각적인","기적의" 등)는 전달하지 말고 사실만.
 원문에는 [허가사항] 전문과, 있을 경우 [쉬운설명]이 함께 옵니다. 내용은 허가사항이 기준이고, 쉬운설명은 표현 참고용.
 """
 
@@ -847,7 +1047,7 @@ def render_country(c: dict, language: str):
 
 # ---------- 화면 ----------
 st.set_page_config(page_title="약말 · 외국인 응대 발음 도우미", page_icon="💊", layout="wide",
-                   initial_sidebar_state="collapsed")
+                   initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
@@ -883,6 +1083,13 @@ div[data-testid="stAudio"] {margin-top:6px;}
 if not DATA_GO_KR_KEY or not GEMINI_API_KEY:
     st.warning("Secrets에 DATA_GO_KR_KEY, GEMINI_API_KEY를 넣어주세요.")
     st.stop()
+
+if "my_products" not in st.session_state:
+    with st.spinner("우리 약국 목록 확인 중… (처음 한 번만)"):
+        st.session_state["my_products"] = resolve_my_items(load_my_from_file())
+    st.session_state["my_dirty"] = False
+render_my_sidebar()
+my_keys = {my_key(x) for x in st.session_state["my_products"]}
 
 col_m, col_l = st.columns([3, 1])
 mode = col_m.radio("모드", ["제품 검색", "🎤 고객 말 듣기"], horizontal=True, label_visibility="collapsed")
@@ -931,16 +1138,30 @@ query = st.text_input("제품명 검색 (예: 타이레놀, 우황청심원, 홍
 if query:
     with st.spinner("식약처 조회 중 (의약품 + 건강기능식품 + 기능성화장품)…"):
         results, errors = search_all(query)
+    qkey = query.replace(" ", "")
+    for x in st.session_state["my_products"]:
+        if x.get("kind") == "화장품(일반)" and (qkey in x["name"].replace(" ", "") or x["name"].replace(" ", "") in qkey):
+            if not any(r["name"] == x["name"] for r in results):
+                results.append({"kind": "화장품(일반)", "name": x["name"], "maker": x.get("maker", ""), "raw": {}})
     for kind, msg in errors.items():
         st.caption(f"⚠️ {kind} 조회 실패: {msg[:120]}")
 
     if not results:
         st.info("찾지 못했어요. 제품명을 바꿔보세요. (의약외품, 기능성 표시가 없는 일반 화장품은 식약처 제품 데이터가 없습니다)")
     else:
-        labels = [f"[{r['kind']}] {r['name']} ({r['maker']})" for r in results]
+        results.sort(key=lambda r: my_key(r) not in my_keys)
+        labels = [f"{'⭐ ' if my_key(r) in my_keys else ''}[{r['kind']}] {r['name']} · {r['maker']}" for r in results]
         pick = st.radio("제품 선택", labels)
         chosen = results[labels.index(pick)]
         raw = chosen["raw"]
+        if my_key(chosen) in my_keys:
+            if st.button("✕ 우리 약국에서 제거", key="rm_chosen"):
+                my_remove(my_key(chosen))
+                st.rerun()
+        else:
+            if st.button("⭐ 우리 약국에 추가", key="add_chosen"):
+                my_add(chosen)
+                st.rerun()
 
         if chosen["kind"] == "의약품":
             easy = easy_by_seq(raw.get("ITEM_SEQ", ""))
@@ -948,6 +1169,33 @@ if query:
             basis = "식약처 의약품 허가정보" + (" + e약은요" if easy else "")
             if "전문" in str(raw.get("ETC_OTC_CODE", "")):
                 st.error("전문의약품입니다. 처방전 없이 판매할 수 없어요.")
+        elif chosen["kind"] == "화장품(일반)":
+            easy = None
+            st.warning("⚠️ 식약처 기능성 인증이 없는 일반 화장품입니다. 효능은 회사 자체 시험/표시 정보이며 식약처 인증이 아닙니다.")
+            ingr_text = ""
+            if naver_ok() and st.button("🔎 네이버에서 전성분·시험결과 찾기", key=f"nv_gc_{chosen['name']}"):
+                st.session_state["nvgc_for"] = chosen["name"]
+            claims_text = ""
+            if naver_ok() and st.session_state.get("nvgc_for") == chosen["name"]:
+                with st.spinner("네이버 검색 중…"):
+                    try:
+                        w = naver_claims(chosen["name"], chosen["maker"])
+                    except Exception as e:
+                        w = {"found": False, "note": str(e)[:200]}
+                if w.get("found"):
+                    ingr_text = w.get("ingredients", "") or ""
+                    claims_text = w.get("claims", "") or ""
+                    st.info(f"웹 출처({w.get('source','')}) — 포장·공식 자료와 대조 필요\n\n"
+                            + (f"시험 결과: {claims_text}\n\n" if claims_text else "")
+                            + (f"전성분: {ingr_text[:300]}{'…' if len(ingr_text)>300 else ''}" if ingr_text else ""))
+                else:
+                    st.caption(f"웹에서 찾지 못했어요. {w.get('note','')}")
+            up_i = st.text_area("또는 전성분 붙여넣기", height=60, placeholder="포장의 전성분표")
+            up_c = st.text_area("또는 시험 결과·특징 붙여넣기", height=60, placeholder="예: 12주 사용 후 피부 요철 개선율 87% (자사 시험)")
+            ingr_text = up_i.strip() or ingr_text
+            claims_text = up_c.strip() or claims_text
+            source_text = build_general_cosm_text(chosen["name"], chosen["maker"], ingr_text, claims_text)
+            basis = "제조사 표시·웹 정보 (식약처 인증 아님)"
         elif chosen["kind"] == "건강기능식품":
             easy = None
             source_text = build_htfs_text(raw)
