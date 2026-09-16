@@ -1314,9 +1314,14 @@ if query:
                 extra = ""
                 if is_zh and pinyin:
                     pin_id += 1
-                    extra = (f'<button class="ym-pinyin-btn" onclick="var e=document.getElementById(\'pin{pin_id}\');'
-                             f'e.style.display=e.style.display===\'block\'?\'none\':\'block\';">拼音 ▾</button>'
-                             f'<div id="pin{pin_id}" class="ym-pinyin">{esc(pinyin)}</div>')
+                    div_id = f"pin{pin_id}"
+                    extra = (
+                        f'<button class="ym-pinyin-btn" onclick="'
+                        f'document.getElementById(&quot;{div_id}&quot;).style.display='
+                        f'(document.getElementById(&quot;{div_id}&quot;).style.display===&quot;block&quot;?&quot;none&quot;:&quot;block&quot;)'
+                        f'">拼音 ▾</button>'
+                        f'<div id="{div_id}" class="ym-pinyin">{esc(pinyin)}</div>'
+                    )
                 html.append(f"<h4>{esc(label)}</h4><p{rtl}>{tr_html}</p>{extra}"
                             + (f'<p class="ko">{esc(ko)}</p>' if ko else ""))
             html.append(f'<div class="ym-basis">근거: {esc(basis)} · AI 생성 안내, 약사 확인 후 제공</div></div>')
