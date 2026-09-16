@@ -213,6 +213,9 @@ def build_drug_text(permit: dict, easy: dict | None) -> str:
         f"[제품명] {permit.get('ITEM_NAME','')}",
         f"[제조사] {permit.get('ENTP_NAME','')}",
     ]
+    chart = clean(permit.get("CHART"))
+    if chart:
+        lines.append(f"[제형·성상] {chart}")
     ingr = parse_material(permit.get("MATERIAL_NAME"))
     if ingr:
         lines.append("[주성분(허가정보)] " + ", ".join(ingr))
@@ -830,8 +833,10 @@ patient_guide: 고객에게 보여줄 안내. 대상 언어로, 짧은 문장, �
 SYSTEM_PHRASES = COMMON + """
 key_phrases: 한국인 약사가 이 제품을 팔면서 직접 입으로 말하면 효과적인 단어·짧은 구 8~9개.
 반드시 아래 세 묶음을 순서대로 포함:
-(a) 효능 3~4개: 이 제품 고유의 것. "대상 + 동사" 짧은 문장 (의약품: "야맹증을 개선해요" / 건기식: "면역력에 도움을 줄 수 있어요"
-    / 화장품: "미백에 도움을 줘요", "SPF 50이에요"). 성분 1개 포함 (예: "홍삼 성분이에요").
+(a) 제형+효능 4~5개: 반드시 첫 항목은 제형 단어 하나만 (예: "크림이에요", "정제예요", "캡슐이에요", "시럽이에요", "패치예요",
+    "환이에요" — [제형·성상] 또는 제품명·제형코드에서 판단). 그다음 이 제품 고유의 효능 3~4개, "대상 + 동사" 짧은 문장
+    (의약품: "야맹증을 개선해요" / 건기식: "면역력에 도움을 줄 수 있어요" / 화장품: "미백에 도움을 줘요", "SPF 50이에요").
+    성분 1개 포함 (예: "홍삼 성분이에요").
 (b) 복용 2~3개: 실제 용법·섭취방법·사용법에서 (예: 하루 두세 번, 한 캡슐, 식후, 아침저녁, 마지막 단계에).
 (c) 확인 2개: 약사가 물어보거나 알려줄 것 (예: 당뇨약 드세요?, 2주 지나도 안 나으면 병원, 민감성 피부세요?).
 각 항목에 "group": "효능" | "복용" | "확인".
@@ -1147,7 +1152,12 @@ if query:
         st.caption(f"⚠️ {kind} 조회 실패: {msg[:120]}")
 
     if not results:
-        st.info("찾지 못했어요. 제품명을 바꿔보세요. (의약외품, 기능성 표시가 없는 일반 화장품은 식약처 제품 데이터가 없습니다)")
+        st.info("의약품·건강기능식품·기능성화장품에서 찾지 못했어요.")
+        maker_g = st.text_input("제조사 (선택)", key="gc_maker")
+        if st.button(f"🧴 '{query}'를 일반 화장품으로 조회", key="gc_go"):
+            st.session_state["gc_pick"] = {"kind": "화장품(일반)", "name": query.strip(), "maker": maker_g.strip(), "raw": {}}
+        if st.session_state.get("gc_pick", {}).get("name") == query.strip():
+            results = [st.session_state["gc_pick"]]
     else:
         results.sort(key=lambda r: my_key(r) not in my_keys)
         labels = [f"{'⭐ ' if my_key(r) in my_keys else ''}[{r['kind']}] {r['name']} · {r['maker']}" for r in results]
