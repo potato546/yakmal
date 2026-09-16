@@ -492,7 +492,7 @@ def render_dur(permit: dict, language: str):
         st.caption("등록 항목: " + " · ".join([f"{k} {len(v)}" for k, v in found.items()] + ([f"병용금기/효능군중복 {n_inter}"] if n_inter else [])))
 
     def q(key, default):
-        tr, ko = pair(qs.get(key)) if qs else ("", "")
+        tr, ko, _ = pair(qs.get(key)) if qs else ("", "", "")
         return f"{tr or ''}  —  {ko or default}".strip(" —")
 
     c1, c2 = st.columns(2)
@@ -1086,8 +1086,7 @@ st.markdown("""
 .ym-tag {display:inline-block; font-size:.75rem; padding:2px 8px; border-radius:6px; margin-right:6px; font-weight:600;}
 .ym-tag.drug {background:#e8eef9; color:#1f3f8a;} .ym-tag.htfs {background:#eef7e6; color:#2f6b1f;} .ym-tag.cosm {background:#fbeef2; color:#8a1f4a;}
 div[data-testid="stAudio"] {margin-top:6px;}
-.ym-pinyin-btn {font-size:.75rem; color:#1f6e4e; background:#e6f1eb; border:none; border-radius:8px; padding:2px 8px; margin:2px 0 4px; cursor:pointer;}
-.ym-pinyin {display:none; font-size:.9rem; color:#2f3d39; font-family: ui-monospace, Menlo, Consolas, monospace; background:#f1f4f2; border-radius:8px; padding:6px 10px; margin-bottom:6px;}
+.ym-pinyin-box {font-size:.9rem; color:#2f3d39; font-family: ui-monospace, Menlo, Consolas, monospace; background:#f1f4f2; border-radius:8px; padding:6px 10px;}
 ruby rt {font-size:.6em; color:#5c6b66;}
 </style>
 <div class="ym-brand"><h1>💊 약말</h1><span>외국인 고객 응대 · 복약안내 + 약사 발음 도우미</span></div>
@@ -1300,30 +1299,28 @@ if query:
             head = "이 약은" if chosen["kind"] == "의약품" else "이 제품은"
             how = {"의약품": "복용법", "건강기능식품": "섭취방법"}.get(chosen["kind"], "사용법")
             rtl = ' dir="rtl"' if language == "아랍어" else ""
-            html = ['<div class="ym-guide">']
             is_zh = language in ("중국어(보통화)", "중국어(번체·대만)", "광둥어")
-            pin_id = 0
+            sections = []
             for label, k in [(head, "what_it_is"), (how, "how_to_take"), ("주의사항", "cautions"),
                              ("약사 상담이 필요한 경우", "see_pharmacist_if")]:
                 v = g.get(k)
                 tr, ko, pinyin = pair(v)
                 if not tr:
                     continue
-                # 일본어는 tr에 <ruby> 태그가 그대로 포함돼 있으므로 이스케이프하지 않음
                 tr_html = tr if language == "일본어" else esc(tr)
-                extra = ""
+                sections.append((label, tr_html, ko, pinyin))
+
+            html = ['<div class="ym-guide">']
+            st.markdown("".join(html), unsafe_allow_html=True)
+            for label, tr_html, ko, pinyin in sections:
+                part = [f"<h4>{esc(label)}</h4>", f"<p{rtl}>{tr_html}</p>"]
+                if ko:
+                    part.append(f'<p class="ko">{esc(ko)}</p>')
+                st.markdown("".join(part), unsafe_allow_html=True)
                 if is_zh and pinyin:
-                    pin_id += 1
-                    div_id = f"pin{pin_id}"
-                    extra = (
-                        f'<button class="ym-pinyin-btn" onclick="'
-                        f'document.getElementById(&quot;{div_id}&quot;).style.display='
-                        f'(document.getElementById(&quot;{div_id}&quot;).style.display===&quot;block&quot;?&quot;none&quot;:&quot;block&quot;)'
-                        f'">拼音 ▾</button>'
-                        f'<div id="{div_id}" class="ym-pinyin">{esc(pinyin)}</div>'
-                    )
-                html.append(f"<h4>{esc(label)}</h4><p{rtl}>{tr_html}</p>{extra}"
-                            + (f'<p class="ko">{esc(ko)}</p>' if ko else ""))
+                    with st.expander("拼音 병음 보기"):
+                        st.markdown(f'<div class="ym-pinyin-box">{esc(pinyin)}</div>', unsafe_allow_html=True)
+            html = []
             html.append(f'<div class="ym-basis">근거: {esc(basis)} · AI 생성 안내, 약사 확인 후 제공</div></div>')
             st.markdown("".join(html), unsafe_allow_html=True)
 
