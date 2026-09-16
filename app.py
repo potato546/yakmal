@@ -753,6 +753,8 @@ def build_general_cosm_text(name: str, maker: str, ingredients: str, claims: str
         "[제품군] 일반화장품 (식약처 기능성 인증 없음 — 효능 단정 금지. 제조사 자체 시험 결과는 출처를 밝혀서만 전달. 광고 형용사 배제)",
         f"[제품명] {clean(name)}",
         f"[제조사] {clean(maker)}",
+        "[제형 힌트] 제품명에서 제형을 판단하세요 (토너/스킨→화장수, 크림/로션→크림, 에센스/세럼→에센스, 폼/클렌저→클렌징폼, 미스트, 팩 등). "
+        "발음 카드 첫 항목은 반드시 이 제형 단어 하나.",
     ]
     if ingredients.strip():
         lines.append(f"[전성분] {clean(ingredients)[:1500]}")
