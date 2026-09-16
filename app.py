@@ -826,8 +826,9 @@ patient_guide: 고객에게 보여줄 안내. 대상 언어로, 짧은 문장, �
 각 항목은 {"ko": 한국어, "tr": 대상 언어} 쌍. ko는 약사가 번역을 검토하기 위한 것이므로 tr과 내용이 정확히 일치해야 함.
 - 대상 언어가 일본어면 tr의 한자마다 <ruby>한자<rt>히라가나</rt></ruby> 태그를 달 것 (예: <ruby>薬<rt>くすり</rt></ruby>を飲んでください).
   히라가나·가타카나·숫자·기호는 태그 없이 그대로. 모든 한자에 빠짐없이 달 것.
-- 대상 언어가 중국어(보통화/번체·대만)나 광둥어면, tr과 별도로 pinyin 필드에 그 문장 전체의 병음(성조 부호 포함, 광둥어는 Jyutping)을
-  띄어쓰기로 이어서 추가할 것. {"ko":"", "tr":"", "pinyin":""} 형태로.
+- 대상 언어가 중국어(보통화/번체·대만)나 광둥어면, tr과 별도로 pinyin_pairs 필드에 그 문장의 한자를 한 글자씩(구두점 제외) 병음과 짝지어
+  배열로 추가: [{"c":"한자1글자","p":"성조 부호 포함 병음"}, ...]. 광둥어는 Jyutping. 숫자·영문·구두점은 pinyin_pairs에서 제외.
+  {"ko":"", "tr":"", "pinyin_pairs":[]} 형태로.
 - what_it_is: 2~3문장. 첫 문장은 효능(또는 기능성)을 쉬운 말로. 이어서 주성분이 어떻게 작용하는지 한 문장 (일반 약학 지식, 보수적으로).
 - how_to_take: 용법·섭취방법·사용법. cautions: 일반 고객에게 실제로 중요한 것(금기, 흔한 부작용, 병용 주의)만.
   see_pharmacist_if. 모두 원문에 있는 내용만 근거로. 없는 정보는 지어내지 마세요.
@@ -940,10 +941,12 @@ def tts_button(text: str, lang_code: str):
     )
 
 
-def pair(v) -> tuple[str, str, str]:
+def pair(v) -> tuple[str, str, list]:
     if isinstance(v, dict):
-        return str(v.get("tr", "")), str(v.get("ko", "")), str(v.get("pinyin", ""))
-    return str(v or ""), "", ""
+        pp = v.get("pinyin_pairs")
+        pp = pp if isinstance(pp, list) else []
+        return str(v.get("tr", "")), str(v.get("ko", "")), pp
+    return str(v or ""), "", []
 
 
 def esc(x) -> str:
@@ -1086,7 +1089,10 @@ st.markdown("""
 .ym-tag {display:inline-block; font-size:.75rem; padding:2px 8px; border-radius:6px; margin-right:6px; font-weight:600;}
 .ym-tag.drug {background:#e8eef9; color:#1f3f8a;} .ym-tag.htfs {background:#eef7e6; color:#2f6b1f;} .ym-tag.cosm {background:#fbeef2; color:#8a1f4a;}
 div[data-testid="stAudio"] {margin-top:6px;}
-.ym-pinyin-box {font-size:.9rem; color:#2f3d39; font-family: ui-monospace, Menlo, Consolas, monospace; background:#f1f4f2; border-radius:8px; padding:6px 10px;}
+.ym-pinyin-row {display:flex; flex-wrap:wrap; gap:2px 4px; background:#f1f4f2; border-radius:8px; padding:10px 12px;}
+.ym-pin-cell {display:flex; flex-direction:column; align-items:center; min-width:1.4em;}
+.ym-pin-py {font-size:.72rem; color:#1f6e4e; font-family: ui-monospace, Menlo, Consolas, monospace; white-space:nowrap;}
+.ym-pin-ch {font-size:1.15rem; color:#1c2a24; line-height:1.1;}
 ruby rt {font-size:.6em; color:#5c6b66;}
 </style>
 <div class="ym-brand"><h1>💊 약말</h1><span>외국인 고객 응대 · 복약안내 + 약사 발음 도우미</span></div>
@@ -1304,22 +1310,27 @@ if query:
             for label, k in [(head, "what_it_is"), (how, "how_to_take"), ("주의사항", "cautions"),
                              ("약사 상담이 필요한 경우", "see_pharmacist_if")]:
                 v = g.get(k)
-                tr, ko, pinyin = pair(v)
+                tr, ko, pinyin_pairs = pair(v)
                 if not tr:
                     continue
                 tr_html = tr if language == "일본어" else esc(tr)
-                sections.append((label, tr_html, ko, pinyin))
+                sections.append((label, tr_html, ko, pinyin_pairs))
 
             html = ['<div class="ym-guide">']
             st.markdown("".join(html), unsafe_allow_html=True)
-            for label, tr_html, ko, pinyin in sections:
+            for label, tr_html, ko, pinyin_pairs in sections:
                 part = [f"<h4>{esc(label)}</h4>", f"<p{rtl}>{tr_html}</p>"]
                 if ko:
                     part.append(f'<p class="ko">{esc(ko)}</p>')
                 st.markdown("".join(part), unsafe_allow_html=True)
-                if is_zh and pinyin:
+                if is_zh and pinyin_pairs:
                     with st.expander("拼音 병음 보기"):
-                        st.markdown(f'<div class="ym-pinyin-box">{esc(pinyin)}</div>', unsafe_allow_html=True)
+                        cells = "".join(
+                            f'<div class="ym-pin-cell"><div class="ym-pin-py">{esc(x.get("p",""))}</div>'
+                            f'<div class="ym-pin-ch">{esc(x.get("c",""))}</div></div>'
+                            for x in pinyin_pairs if isinstance(x, dict) and x.get("c")
+                        )
+                        st.markdown(f'<div class="ym-pinyin-row">{cells}</div>', unsafe_allow_html=True)
             html = []
             html.append(f'<div class="ym-basis">근거: {esc(basis)} · AI 생성 안내, 약사 확인 후 제공</div></div>')
             st.markdown("".join(html), unsafe_allow_html=True)
