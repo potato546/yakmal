@@ -824,6 +824,10 @@ COMMON = """당신은 한국 약국에서 외국인 고객을 응대하는 약�
 SYSTEM_GUIDE = COMMON + """
 patient_guide: 고객에게 보여줄 안내. 대상 언어로, 짧은 문장, 쉬운 표현.
 각 항목은 {"ko": 한국어, "tr": 대상 언어} 쌍. ko는 약사가 번역을 검토하기 위한 것이므로 tr과 내용이 정확히 일치해야 함.
+- 대상 언어가 일본어면 tr의 한자마다 <ruby>한자<rt>히라가나</rt></ruby> 태그를 달 것 (예: <ruby>薬<rt>くすり</rt></ruby>を飲んでください).
+  히라가나·가타카나·숫자·기호는 태그 없이 그대로. 모든 한자에 빠짐없이 달 것.
+- 대상 언어가 중국어(보통화/번체·대만)나 광둥어면, tr과 별도로 pinyin 필드에 그 문장 전체의 병음(성조 부호 포함, 광둥어는 Jyutping)을
+  띄어쓰기로 이어서 추가할 것. {"ko":"", "tr":"", "pinyin":""} 형태로.
 - what_it_is: 2~3문장. 첫 문장은 효능(또는 기능성)을 쉬운 말로. 이어서 주성분이 어떻게 작용하는지 한 문장 (일반 약학 지식, 보수적으로).
 - how_to_take: 용법·섭취방법·사용법. cautions: 일반 고객에게 실제로 중요한 것(금기, 흔한 부작용, 병용 주의)만.
   see_pharmacist_if. 모두 원문에 있는 내용만 근거로. 없는 정보는 지어내지 마세요.
@@ -936,10 +940,10 @@ def tts_button(text: str, lang_code: str):
     )
 
 
-def pair(v) -> tuple[str, str]:
+def pair(v) -> tuple[str, str, str]:
     if isinstance(v, dict):
-        return str(v.get("tr", "")), str(v.get("ko", ""))
-    return str(v or ""), ""
+        return str(v.get("tr", "")), str(v.get("ko", "")), str(v.get("pinyin", ""))
+    return str(v or ""), "", ""
 
 
 def esc(x) -> str:
@@ -1036,7 +1040,7 @@ def render_country(c: dict, language: str):
         item = c.get(k) or {}
         if not isinstance(item, dict) or item.get("level") == "해당없음":
             continue
-        tr, ko = pair(item.get("text"))
+        tr, ko, _ = pair(item.get("text"))
         if not (tr or ko):
             continue
         shown += 1
@@ -1082,6 +1086,9 @@ st.markdown("""
 .ym-tag {display:inline-block; font-size:.75rem; padding:2px 8px; border-radius:6px; margin-right:6px; font-weight:600;}
 .ym-tag.drug {background:#e8eef9; color:#1f3f8a;} .ym-tag.htfs {background:#eef7e6; color:#2f6b1f;} .ym-tag.cosm {background:#fbeef2; color:#8a1f4a;}
 div[data-testid="stAudio"] {margin-top:6px;}
+.ym-pinyin-btn {font-size:.75rem; color:#1f6e4e; background:#e6f1eb; border:none; border-radius:8px; padding:2px 8px; margin:2px 0 4px; cursor:pointer;}
+.ym-pinyin {display:none; font-size:.9rem; color:#2f3d39; font-family: ui-monospace, Menlo, Consolas, monospace; background:#f1f4f2; border-radius:8px; padding:6px 10px; margin-bottom:6px;}
+ruby rt {font-size:.6em; color:#5c6b66;}
 </style>
 <div class="ym-brand"><h1>💊 약말</h1><span>외국인 고객 응대 · 복약안내 + 약사 발음 도우미</span></div>
 <p class="ym-sub">식약처 공공데이터를 근거로 고객 언어 안내문을 만들고, 약사가 직접 말할 핵심 표현을 발음과 함께 제시합니다.</p>
@@ -1294,19 +1301,24 @@ if query:
             how = {"의약품": "복용법", "건강기능식품": "섭취방법"}.get(chosen["kind"], "사용법")
             rtl = ' dir="rtl"' if language == "아랍어" else ""
             html = ['<div class="ym-guide">']
+            is_zh = language in ("중국어(보통화)", "중국어(번체·대만)", "광둥어")
+            pin_id = 0
             for label, k in [(head, "what_it_is"), (how, "how_to_take"), ("주의사항", "cautions"),
                              ("약사 상담이 필요한 경우", "see_pharmacist_if")]:
-                tr, ko = pair(g.get(k))
+                v = g.get(k)
+                tr, ko, pinyin = pair(v)
                 if not tr:
                     continue
-                html.append(f"<h4>{esc(label)}</h4><p{rtl}>{esc(tr)}</p>" + (f'<p class="ko">{esc(ko)}</p>' if ko else ""))
-            ingr = [i for i in (g.get("ingredients") or []) if isinstance(i, dict)]
-            if ingr:
-                html.append("<h4>주요 성분</h4>")
-                for i in ingr:
-                    html.append(f"<p{rtl}><b>{esc(i.get('name_tr'))}</b> {esc(i.get('amount'))} — {esc(i.get('role_tr'))}</p>"
-                                f"<p class=\"ko\">{esc(i.get('name_ko'))} — {esc(i.get('role_ko'))}</p>")
-                html.append('<div class="ym-basis">성분·함량: 식약처 데이터 · 역할 설명: 일반 약학 정보(AI)</div>')
+                # 일본어는 tr에 <ruby> 태그가 그대로 포함돼 있으므로 이스케이프하지 않음
+                tr_html = tr if language == "일본어" else esc(tr)
+                extra = ""
+                if is_zh and pinyin:
+                    pin_id += 1
+                    extra = (f'<button class="ym-pinyin-btn" onclick="var e=document.getElementById(\'pin{pin_id}\');'
+                             f'e.style.display=e.style.display===\'block\'?\'none\':\'block\';">拼音 ▾</button>'
+                             f'<div id="pin{pin_id}" class="ym-pinyin">{esc(pinyin)}</div>')
+                html.append(f"<h4>{esc(label)}</h4><p{rtl}>{tr_html}</p>{extra}"
+                            + (f'<p class="ko">{esc(ko)}</p>' if ko else ""))
             html.append(f'<div class="ym-basis">근거: {esc(basis)} · AI 생성 안내, 약사 확인 후 제공</div></div>')
             st.markdown("".join(html), unsafe_allow_html=True)
 
