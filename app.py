@@ -934,27 +934,34 @@ country_notes: 이 제품을 외국인 관광객이 사서 본국으로 가져�
  "pharmacist_checks": ["약사가 제조사에 확인하거나 고객에게 물어볼 것 (예: 캡슐 젤라틴 기원(소/돼지) 제조사 확인)"]}"""
 
 
+FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-2.5-flash"]
+
+
 def _gen_json(system: str, user: str) -> dict:
     last_err = None
-    for attempt in range(3):
-        try:
-            resp = client.models.generate_content(
-                model=MODEL, contents=user,
-                config=types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
-                                                   thinking_config=types.ThinkingConfig(thinking_level="low")),
-            )
-            if not resp.text:
-                raise RuntimeError(f"빈 응답: {resp.candidates[0].finish_reason if resp.candidates else resp}")
-            raw = re.sub(r"^```(?:json)?|```$", "", resp.text.strip(), flags=re.M).strip()
-            raw = raw[raw.find("{"):]
-            obj, _ = json.JSONDecoder().raw_decode(raw)
-            return obj
-        except Exception as e:
-            last_err = e
-            if "503" in str(e) or ("429" in str(e) and "per_day" not in str(e).lower()):
-                time.sleep(3)
-                continue
-            raise
+    for model in FALLBACK_MODELS:
+        for attempt in range(4):
+            try:
+                resp = client.models.generate_content(
+                    model=model, contents=user,
+                    config=types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
+                                                       thinking_config=types.ThinkingConfig(thinking_level="low")),
+                )
+                if not resp.text:
+                    raise RuntimeError(f"빈 응답: {resp.candidates[0].finish_reason if resp.candidates else resp}")
+                raw = re.sub(r"^```(?:json)?|```$", "", resp.text.strip(), flags=re.M).strip()
+                raw = raw[raw.find("{"):]
+                obj, _ = json.JSONDecoder().raw_decode(raw)
+                return obj
+            except Exception as e:
+                last_err = e
+                if "503" in str(e) or ("429" in str(e) and "per_day" not in str(e).lower()):
+                    time.sleep(4 + attempt * 2)
+                    continue
+                if "429" in str(e) and "per_day" in str(e).lower():
+                    break  # 이 모델 일일 한도 소진 — 바로 다음 모델로
+                raise
+    raise last_err
     raise last_err
 
 
