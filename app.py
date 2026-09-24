@@ -934,13 +934,13 @@ country_notes: 이 제품을 외국인 관광객이 사서 본국으로 가져�
  "pharmacist_checks": ["약사가 제조사에 확인하거나 고객에게 물어볼 것 (예: 캡슐 젤라틴 기원(소/돼지) 제조사 확인)"]}"""
 
 
-FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.6-flash", "gemini-2.5-flash"]
+FALLBACK_MODELS = ["gemini-3.1-flash-lite", "gemini-3.6-flash"]
 
 
 def _gen_json(system: str, user: str) -> dict:
     last_err = None
     for model in FALLBACK_MODELS:
-        for attempt in range(4):
+        for attempt in range(2):
             try:
                 resp = client.models.generate_content(
                     model=model, contents=user,
@@ -956,7 +956,7 @@ def _gen_json(system: str, user: str) -> dict:
             except Exception as e:
                 last_err = e
                 if "503" in str(e) or ("429" in str(e) and "per_day" not in str(e).lower()):
-                    time.sleep(4 + attempt * 2)
+                    time.sleep(2)
                     continue
                 if ("429" in str(e) and "per_day" in str(e).lower()) or "404" in str(e) or "NOT_FOUND" in str(e):
                     break  # 이 모델 한도 소진 또는 더 이상 없음 — 바로 다음 모델로
