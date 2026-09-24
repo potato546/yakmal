@@ -168,16 +168,17 @@ def search_htfs_local(q: str, rows: int = 8) -> list[dict]:
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def search_htfs(q: str, rows: int = 6) -> list[dict]:
+    # 로컬(식품안전나라 C003)이 원재료명까지 있어 더 자세함 — 먼저 시도
     for v in search_variants(q):
+        local = search_htfs_local(v, rows)
+        if local:
+            return local
         try:
             items = _get(HTFS_URL, {"Prduct": v, "numOfRows": rows})
         except Exception:
             items = []
         if items:
             return [{"kind": "건강기능식품", "name": it.get("PRDUCT", "").strip(), "maker": it.get("ENTRPS", ""), "raw": it} for it in items]
-        local = search_htfs_local(v, rows)
-        if local:
-            return local
     return []
 
 
