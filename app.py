@@ -1,3 +1,4 @@
+import gzip
 import io
 import json
 import os
@@ -116,12 +117,56 @@ def search_drug(q: str, rows: int = 6) -> list[dict]:
     return []
 
 
+# ---------- 건강기능식품 로컬 데이터셋 (식품안전나라 C003, 09~19시 API 제한 우회) ----------
+HTFS_LOCAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "htfs_c003.jsonl.gz")
+
+
+@st.cache_resource(show_spinner=False)
+def load_htfs_local() -> list[dict]:
+    """식품안전나라 건강기능식품 품목제조신고(C003) 로컬 사본. 없으면 빈 목록 (앱은 정상 동작)."""
+    if not os.path.exists(HTFS_LOCAL_FILE):
+        return []
+    out = []
+    with gzip.open(HTFS_LOCAL_FILE, "rt", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    pass
+    return out
+
+
+def search_htfs_local(q: str, rows: int = 8) -> list[dict]:
+    data = load_htfs_local()
+    if not data:
+        return []
+    key = q.replace(" ", "")
+    hits = [d for d in data if key in (d.get("PRDLST_NM") or "").replace(" ", "")]
+    out = []
+    for d in hits[:rows]:
+        it = {"PRDUCT": d.get("PRDLST_NM", ""), "ENTRPS": d.get("BSSH_NM", ""),
+              "SRV_USE": d.get("NTK_MTHD", ""), "MAIN_FNCTN": d.get("PRIMARY_FNCLTY", ""),
+              "INTAKE_HINT1": d.get("IFTKN_ATNT_MATR_CN", ""), "SUNGSANG": d.get("PRDT_SHAP_CD_NM", ""),
+              "STTEMNT_NO": d.get("PRDLST_REPORT_NO", ""), "BASE_STANDARD": d.get("RAWMTRL_NM", "")}
+        out.append({"kind": "건강기능식품", "name": it["PRDUCT"].strip(), "maker": it["ENTRPS"], "raw": it})
+    return out
+
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def search_htfs(q: str, rows: int = 6) -> list[dict]:
     for v in search_variants(q):
-        items = _get(HTFS_URL, {"Prduct": v, "numOfRows": rows})
+        try:
+            items = _get(HTFS_URL, {"Prduct": v, "numOfRows": rows})
+        except Exception:
+            items = []
         if items:
             return [{"kind": "건강기능식품", "name": it.get("PRDUCT", "").strip(), "maker": it.get("ENTRPS", ""), "raw": it} for it in items]
+        local = search_htfs_local(v, rows)
+        if local:
+            return local
     return []
 
 
