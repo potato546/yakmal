@@ -1282,6 +1282,10 @@ if query:
             source_text = build_htfs_text(raw)
             basis = "식약처 건강기능식품정보"
             st.info("건강기능식품 — 안내문과 발음 카드는 '~에 도움을 줄 수 있어요' 표현으로 생성됩니다.")
+            if clean(raw.get("RAWMTRL_NM")):
+                with st.expander("📋 전체 원재료명 (식약처 원문)"):
+                    st.write(clean(raw.get("RAWMTRL_NM")))
+                    st.caption("AI 요약이 일부만 뽑았을 수 있어 원문을 그대로 보여드려요. 고객에게는 이 목록을 직접 짚어 설명할 수 있어요.")
         else:
             easy = None
             fn = clean(raw.get("EE_NAME")) or doc_text(raw.get("EE_DOC_DATA")) or "기능성화장품"
