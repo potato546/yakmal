@@ -945,7 +945,8 @@ def _gen_json(system: str, user: str) -> dict:
                 resp = client.models.generate_content(
                     model=model, contents=user,
                     config=types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
-                                                       thinking_config=types.ThinkingConfig(thinking_level="low")),
+                                                       thinking_config=types.ThinkingConfig(thinking_level="low"),
+                                                       http_options=types.HttpOptions(timeout=20000)),
                 )
                 if not resp.text:
                     raise RuntimeError(f"빈 응답: {resp.candidates[0].finish_reason if resp.candidates else resp}")
