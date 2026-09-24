@@ -149,7 +149,7 @@ def search_htfs_local(q: str, rows: int = 8) -> list[dict]:
         it = {"PRDUCT": d.get("PRDLST_NM", ""), "ENTRPS": d.get("BSSH_NM", ""),
               "SRV_USE": d.get("NTK_MTHD", ""), "MAIN_FNCTN": d.get("PRIMARY_FNCLTY", ""),
               "INTAKE_HINT1": d.get("IFTKN_ATNT_MATR_CN", ""), "SUNGSANG": d.get("PRDT_SHAP_CD_NM", ""),
-              "STTEMNT_NO": d.get("PRDLST_REPORT_NO", ""), "BASE_STANDARD": d.get("RAWMTRL_NM", "")}
+              "STTEMNT_NO": d.get("PRDLST_REPORT_NO", ""), "RAWMTRL_NM": d.get("RAWMTRL_NM", "")}
         out.append({"kind": "건강기능식품", "name": it["PRDUCT"].strip(), "maker": it["ENTRPS"], "raw": it})
     return out
 
@@ -288,7 +288,8 @@ def build_htfs_text(h: dict) -> str:
     ]
     for label, key in [("기능성 내용(식약처 인정)", "MAIN_FNCTN"), ("섭취량·섭취방법", "SRV_USE"),
                        ("섭취 시 주의사항", "INTAKE_HINT1"), ("성상", "SUNGSANG"),
-                       ("보관방법", "PRSRV_PD"), ("유통기한", "DISTB_PD"), ("기준규격", "BASE_STANDARD")]:
+                       ("보관방법", "PRSRV_PD"), ("유통기한", "DISTB_PD"), ("기준규격", "BASE_STANDARD"),
+                       ("원재료명", "RAWMTRL_NM")]:
         t = clean(h.get(key))
         if t:
             lines.append(f"[{label}] {t[:1200]}")
