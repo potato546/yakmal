@@ -1410,9 +1410,16 @@ if query:
                             for x in pinyin_pairs if isinstance(x, dict) and x.get("c")
                         )
                         st.markdown(f'<div class="ym-pinyin-row">{cells}</div>', unsafe_allow_html=True)
-            html = []
-            html.append(f'<div class="ym-basis">근거: {esc(basis)} · AI 생성 안내, 약사 확인 후 제공</div></div>')
-            st.markdown("".join(html), unsafe_allow_html=True)
+            ingr = [i for i in (g.get("ingredients") or []) if isinstance(i, dict)]
+            if ingr:
+                ihtml = ['<h4>주요 성분</h4>']
+                for i in ingr:
+                    ihtml.append(f"<p{rtl}><b>{esc(i.get('name_tr'))}</b> {esc(i.get('amount'))} — {esc(i.get('role_tr'))}</p>"
+                                 f'<p class="ko">{esc(i.get("name_ko"))} — {esc(i.get("role_ko"))}</p>')
+                st.markdown("".join(ihtml), unsafe_allow_html=True)
+                st.caption("성분·함량: 식약처 데이터 · 역할 설명: 일반 약학 정보(AI)")
+
+            st.markdown(f'<div class="ym-basis">근거: {esc(basis)} · AI 생성 안내, 약사 확인 후 제공</div></div>', unsafe_allow_html=True)
 
         with right:
             st.subheader("🗣️ 약사가 직접 말하기")
