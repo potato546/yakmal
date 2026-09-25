@@ -967,24 +967,26 @@ def _gen_json(system: str, user: str) -> dict:
     raise last_err
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def generate(source_text: str, language: str, flags: tuple[str, ...] = ()) -> dict:
-    """안내문 / 발음 카드 / 국가별 안전사항을 세 요청으로 나눠 동시에 생성"""
+def _base_user(source_text: str, language: str) -> str:
     tts_code, phon = LANGUAGES[language]
-    user = f"대상 언어: {language} (발음 특성: {phon})\n\n식약처 원문:\n{source_text}"
+    return f"대상 언어: {language} (발음 특성: {phon})\n\n식약처 원문:\n{source_text}"
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def generate_phrases(source_text: str, language: str) -> dict:
+    return _gen_json(SYSTEM_PHRASES, _base_user(source_text, language))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def generate_guide(source_text: str, language: str) -> dict:
+    return _gen_json(SYSTEM_GUIDE, _base_user(source_text, language))
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def generate_country(source_text: str, language: str, flags: tuple[str, ...] = ()) -> dict:
     user_c = (f"대상 언어: {language}\n고객 국가·지역: {COUNTRY.get(language, language)}\n"
               f"고객 특이사항: {', '.join(flags) if flags else '없음'}\n\n식약처 원문:\n{source_text}")
-    with ThreadPoolExecutor(max_workers=3) as ex:
-        f_guide = ex.submit(_gen_json, SYSTEM_GUIDE, user)
-        f_phr = ex.submit(_gen_json, SYSTEM_PHRASES, user)
-        f_cty = ex.submit(_gen_json, SYSTEM_COUNTRY, user_c)
-        guide = f_guide.result()
-        phr = f_phr.result()
-        try:
-            cty = f_cty.result()
-        except Exception as e:
-            cty = {"_error": str(e)[:200]}
-    return {"patient_guide": guide, "key_phrases": phr.get("key_phrases", []), "country_notes": cty}
+    return _gen_json(SYSTEM_COUNTRY, user_c)
 
 
 # ---------- 음성 ----------
@@ -1106,7 +1108,6 @@ def listen_and_reply(data: bytes, mime: str, hint_lang: str, is_image: bool = Fa
 
 
 def render_country(c: dict, language: str):
-    st.subheader(f"🌍 국가별 안전사항 · {COUNTRY.get(language, language).split(' (')[0]}")
     if c.get("_error"):
         st.caption(f"생성 실패: {c['_error']}")
         return
@@ -1133,6 +1134,87 @@ def render_country(c: dict, language: str):
         html.append("<p>이 제품·국가 조합에서 특별히 알려줄 사항이 없습니다.</p>")
     html.append('<div class="ym-basis">「확인」= 식약처 원문 근거 · 「참고」= 일반 지식(반입 규제는 출국 전 세관·대사관 확인)</div></div>')
     st.markdown("".join(html), unsafe_allow_html=True)
+
+
+# ---------- 인쇄용 안내문 (브라우저 인쇄 → PDF 저장, 모든 언어 폰트 문제 없음) ----------
+def build_print_html(product_name: str, language: str, g: dict, ingr: list, basis: str) -> str:
+    rtl = language == "아랍어"
+    dirattr = ' dir="rtl"' if rtl else ""
+    align = "right" if rtl else "left"
+
+    def row(label_ko, k, label_tr=""):
+        tr, ko, _ = pair(g.get(k))
+        if not tr:
+            return ""
+        tr_html = tr if language == "일본어" else esc(tr)
+        return f"""<div class="row">
+  <div class="lbl">{esc(label_ko)}</div>
+  <div class="tr">{tr_html}</div>
+  <div class="ko">{esc(ko)}</div>
+</div>"""
+
+    rows_html = "".join([
+        row("이 약은 / 이 제품은", "what_it_is"),
+        row("복용법 / 사용법", "how_to_take"),
+        row("주의사항", "cautions"),
+        row("약사 상담이 필요한 경우", "see_pharmacist_if"),
+    ])
+
+    ingr_html = ""
+    if ingr:
+        items = "".join(
+            f'<div class="ingr-row"><b>{esc(i.get("name_tr",""))}</b> {esc(i.get("amount",""))} — {esc(i.get("role_tr",""))}'
+            f'<div class="ko">{esc(i.get("name_ko",""))} — {esc(i.get("role_ko",""))}</div></div>'
+            for i in ingr if isinstance(i, dict)
+        )
+        ingr_html = f'<div class="section-title">주요 성분</div>{items}'
+
+    today = time.strftime("%Y-%m-%d")
+    return f"""<!doctype html>
+<html lang="ko">
+<head><meta charset="utf-8">
+<style>
+  @page {{ size: A5; margin: 14mm; }}
+  body {{ font-family: -apple-system, "Noto Sans", "Noto Sans KR", "Noto Sans CJK", "Noto Sans Arabic",
+          "Noto Sans Devanagari", "Noto Sans Thai", sans-serif; color:#1c2a24; margin:0; }}
+  .wrap {{ max-width: 480px; margin: 0 auto; }}
+  h1 {{ font-size: 18px; margin: 0 0 2px; }}
+  .meta {{ font-size: 11px; color:#5c6b66; margin-bottom: 14px; }}
+  .row {{ margin-bottom: 10px; }}
+  .lbl {{ font-size: 10px; color:#5c6b66; font-weight:700; }}
+  .tr {{ font-size: 15px; line-height:1.5; margin: 1px 0; }}
+  .ko {{ font-size: 11px; color:#7a8683; }}
+  .section-title {{ font-size: 12px; font-weight:700; color:#1f6e4e; margin: 12px 0 4px; border-top:1px solid #e3e6e1; padding-top:8px; }}
+  .ingr-row {{ font-size: 13px; margin-bottom:6px; }}
+  .basis {{ font-size: 10px; color:#7a8683; margin-top: 14px; border-top:1px dashed #e3e6e1; padding-top:8px; }}
+  .sign {{ margin-top: 18px; font-size: 11px; color:#5c6b66; display:flex; justify-content:space-between; }}
+  .no-print {{ text-align:center; margin: 14px 0; }}
+  .no-print button {{ font-size:15px; padding:10px 20px; border-radius:10px; border:1px solid #1f6e4e;
+                       background:#1f6e4e; color:#fff; cursor:pointer; }}
+  @media print {{ .no-print {{ display:none; }} }}
+</style></head>
+<body{dirattr}>
+<div class="no-print"><button onclick="window.print()">🖨️ 인쇄 / PDF로 저장</button></div>
+<div class="wrap" style="text-align:{align}">
+  <h1>{esc(product_name)}</h1>
+  <div class="meta">{today} · 약사 확인 후 전달용</div>
+  {rows_html}
+  {ingr_html}
+  <div class="basis">근거: {esc(basis)} · AI 생성 안내, 약사 확인 후 제공</div>
+  <div class="sign"><span>약사 확인: ______________</span><span>{today}</span></div>
+</div>
+</body></html>"""
+
+
+def render_print_button(product_name: str, language: str, out: dict, basis: str):
+    g = out.get("patient_guide", {}) or {}
+    ingr = [i for i in (g.get("ingredients") or []) if isinstance(i, dict)]
+    html_doc = build_print_html(product_name, language, g, ingr, basis)
+    with st.expander("🖨️ 인쇄용 안내문 (PDF로 저장 가능)"):
+        st.caption("아래 화면에서 '인쇄 / PDF로 저장'을 누르면 인쇄창이 열립니다. 인쇄창에서 프린터 대신 'PDF로 저장'을 고르면 PDF 파일이 됩니다.")
+        components.html(html_doc, height=520, scrolling=True)
+        st.download_button("⬇️ 이 안내문 파일로 저장 (나중에 다시 인쇄)", html_doc,
+                           file_name=f"{product_name}_{language}.html", mime="text/html")
 
 
 # ---------- 화면 ----------
@@ -1367,21 +1449,38 @@ if query:
         with st.expander("식약처 원문 보기"):
             st.text(source_text)
 
-        with st.spinner(f"{language} 안내 + 발음 카드 생성 중…"):
-            try:
-                out = generate(source_text, language, flags)
-            except Exception as e:
-                st.error(f"생성 실패: {e}")
-                st.stop()
-
         tts_code = LANGUAGES[language][0]
         left, right = st.columns(2)
 
+        with ThreadPoolExecutor(max_workers=2) as ex_gen:
+            f_phr = ex_gen.submit(generate_phrases, source_text, language)
+            f_guide = ex_gen.submit(generate_guide, source_text, language)
+
+            with right:
+                st.subheader("🗣️ 약사가 직접 말하기")
+                with st.spinner("발음 카드 생성 중…"):
+                    try:
+                        phr = f_phr.result()
+                    except Exception as e:
+                        st.error(f"발음 카드 생성 실패: {e}")
+                        phr = {"key_phrases": []}
+                render_phrases(phr.get("key_phrases"), language)
+
+            with left:
+                st.subheader(f"🧾 고객용 안내 · {language}")
+                with st.spinner("안내문 생성 중…"):
+                    try:
+                        guide = f_guide.result()
+                    except Exception as e:
+                        st.error(f"안내문 생성 실패: {e}")
+                        guide = {}
+
+        out = {"patient_guide": guide, "key_phrases": phr.get("key_phrases", [])}
+
         with left:
-            st.subheader(f"🧾 고객용 안내 · {language}")
             if chosen["kind"] == "의약품" and easy and easy.get("itemImage"):
                 st.image(easy["itemImage"], width=200, caption="낱알 모양")
-            g = out.get("patient_guide", {}) or {}
+            g = guide or {}
             head = "이 약은" if chosen["kind"] == "의약품" else "이 제품은"
             how = {"의약품": "복용법", "건강기능식품": "섭취방법"}.get(chosen["kind"], "사용법")
             rtl = ' dir="rtl"' if language == "아랍어" else ""
@@ -1422,11 +1521,23 @@ if query:
 
             st.markdown(f'<div class="ym-basis">근거: {esc(basis)} · AI 생성 안내, 약사 확인 후 제공</div></div>', unsafe_allow_html=True)
 
-        with right:
-            st.subheader("🗣️ 약사가 직접 말하기")
-            render_phrases(out.get("key_phrases"), language)
+        render_print_button(chosen["name"], language, out, basis)
 
         if chosen["kind"] == "의약품":
             render_dur(raw, language)
-        render_country(out.get("country_notes") or {}, language)
+
+        with st.expander(f"🌍 국가별 안전사항 · {COUNTRY.get(language, language).split(' (')[0]} (누르면 생성)"):
+            if st.button("생성하기", key=f"cty_{chosen['name']}_{language}"):
+                with st.spinner("국가별 안전사항 확인 중…"):
+                    try:
+                        cty = generate_country(source_text, language, flags)
+                    except Exception as e:
+                        cty = {"_error": str(e)[:200]}
+                st.session_state[f"cty_result_{chosen['name']}_{language}"] = cty
+            cty = st.session_state.get(f"cty_result_{chosen['name']}_{language}")
+            if cty:
+                render_country(cty, language)
+            else:
+                st.caption("본국 반입 규제, 종교·식이(할랄 등), 본국 등가 제품을 확인하려면 위 버튼을 누르세요.")
+
         render_reviews(chosen["name"], chosen["kind"])
